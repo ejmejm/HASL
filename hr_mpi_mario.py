@@ -5,7 +5,9 @@ from mpi4py import MPI
 import cv2
 from ludus.utils import discount_rewards
 import heapq
-from tensorflow.keras.layers import Input, Dense, Conv2D, MaxPool2D, Flatten
+import tensorflow as tf
+from model import HASL
+import multiprocessing
 
 # Super Mario stuff
 from nes_py.wrappers import BinarySpaceToDiscreteSpaceEnv
@@ -78,7 +80,7 @@ if __name__ == '__main__':
 
     ### Define starting parameters ###
     n_epochs = 1000
-    n_train_batches = 40
+    n_train_batches = 20
     n_process_batches = int(n_train_batches / n_processes)
     top_frac = 0.1
     top_x = int(np.ceil(n_processes * top_frac))
@@ -88,69 +90,86 @@ if __name__ == '__main__':
 
     init_logger('progress.log')
 
-    for epoch in range(1, n_epochs+1):
-        train_data = []
-        for _ in range(n_process_batches):
-            ### Simulate more episodes to gain training data ###
+    if rank == controller:
+        device_config = tf.ConfigProto()
+        use_device = tf.device('/cpu:0')
+    else:
+        device_config = tf.ConfigProto(device_count={'GPU': 0})
+        # n_cpus = multiprocessing.cpu_count()
+        # device_config = tf.ConfigProto(device_count={'GPU': 0, 'CPU': n_cpus},
+        #                 inter_op_parallelism_threads=n_cpus,
+        #                 intra_op_parallelism_threads=1,
+        #                 log_device_placement=True)
+        # print(rank % n_cpus)
+        # use_device = tf.device(f'/cpu:{rank % n_cpus}')
+
+    # with use_device:
+    with tf.Session(config=device_config) as sess:
+        hasl = HASL(sess, comm, controller, rank)
+
+        for epoch in range(1, n_epochs+1):
+            train_data = []
+            for _ in range(n_process_batches):
+                ### Simulate more episodes to gain training data ###
+                if rank == controller:
+                    train_data.extend(comm.gather(worker(train_act_sets), controller))
+                else:
+                    comm.gather(worker(train_act_sets), controller)
+
             if rank == controller:
-                train_data.extend(comm.gather(worker(train_act_sets), controller))
+                print(f'----- Epoch {epoch} -----')
+
+                if epoch % 10 == 0:
+                    log(f'Epoch {epoch} train action sets:')
+                    log(str(train_act_sets) + '\n')
+
+                ### Pull rewards from the training data ###
+                reward_list = []
+                for i in range(len(train_data)):
+                    reward_list.append(sum(train_data[i][:,2]))
+
+                print(f'Avg Reward: {np.mean(reward_list)}, Min: {np.min(reward_list)}, Max: {np.max(reward_list)}, Std: {np.std(reward_list)}')
+        
+                ### Use softmax on rewards to stochastically choose which episodes to pull actions from ###
+                max_reward = max(reward_list)
+                scaled_rewards = [r - max_reward for r in reward_list]
+                reward_sum = sum(scaled_rewards)
+                scaled_rewards = [r / reward_sum for r in scaled_rewards]
+
+                selected_ids = np.random.choice(range(len(train_data)), size=top_x, replace=False, p=scaled_rewards)
+                top_data = [train_data[idx] for idx in selected_ids]
+
+
+                ### Count all the actions of specified sizes from the chosen episodes ###
+                strain_act_sets = set([tuple(x) for x in train_act_sets])
+                branch_dicts = {}
+                for seq_len in range(min_branch, max_branch+1):
+                    count_dict = {}
+                    for episode in top_data:
+                        ep_acts = episode[:,1]
+                        for step_idx in range(seq_len-1, len(ep_acts)):
+                            new_act_set = tuple(np.concatenate(ep_acts[step_idx-seq_len+1:step_idx+1]))
+                            if tuple(new_act_set) not in strain_act_sets:
+                                if new_act_set in count_dict:
+                                    count_dict[new_act_set] += 1
+                                else:
+                                    count_dict[new_act_set] = 1
+                    
+                    branch_dicts[seq_len] = count_dict
+
+                ### Choose the new action sequences to be added to be used ###
+                top_acts = []
+                for n_branch in range(min_branch, max_branch+1):
+                    top_acts.extend([list(x[0]) for x in heapq.nlargest(act_top_x, list(branch_dicts[n_branch].items()), key=lambda x: x[1])])
+                    
+                for act in top_acts:
+                    train_act_sets.append(act)
+
+                ### Send the new action sequences to each process ###
+                comm.bcast(train_act_sets, controller)
             else:
-                comm.gather(worker(train_act_sets), controller)
+                ### Incorporate the new action sequences into its list for further training ###
+                train_act_sets = comm.bcast(None, controller)
 
-        if rank == controller:
-            print(f'----- Epoch {epoch} -----')
-
-            if epoch % 10 == 0:
-                log(f'Epoch {epoch} train action sets:')
-                log(str(train_act_sets) + '\n')
-
-            ### Pull rewards from the training data ###
-            reward_list = []
-            for i in range(len(train_data)):
-                reward_list.append(sum(train_data[i][:,2]))
-
-            print(f'Avg Reward: {np.mean(reward_list)}, Min: {np.min(reward_list)}, Max: {np.max(reward_list)}, Std: {np.std(reward_list)}')
-    
-            ### Use softmax on rewards to stochastically choose which episodes to pull actions from ###
-            max_reward = max(reward_list)
-            scaled_rewards = [r - max_reward for r in reward_list]
-            reward_sum = sum(scaled_rewards)
-            scaled_rewards = [r / reward_sum for r in scaled_rewards]
-
-            selected_ids = np.random.choice(range(len(train_data)), size=top_x, replace=False, p=scaled_rewards)
-            top_data = [train_data[idx] for idx in selected_ids]
-
-
-            ### Count all the actions of specified sizes from the chosen episodes ###
-            strain_act_sets = set([tuple(x) for x in train_act_sets])
-            branch_dicts = {}
-            for seq_len in range(min_branch, max_branch+1):
-                count_dict = {}
-                for episode in top_data:
-                    ep_acts = episode[:,1]
-                    for step_idx in range(seq_len-1, len(ep_acts)):
-                        new_act_set = tuple(np.concatenate(ep_acts[step_idx-seq_len+1:step_idx+1]))
-                        if tuple(new_act_set) not in strain_act_sets:
-                            if new_act_set in count_dict:
-                                count_dict[new_act_set] += 1
-                            else:
-                                count_dict[new_act_set] = 1
-                
-                branch_dicts[seq_len] = count_dict
-
-            ### Choose the new action sequences to be added to be used ###
-            top_acts = []
-            for n_branch in range(min_branch, max_branch+1):
-                top_acts.extend([list(x[0]) for x in heapq.nlargest(act_top_x, list(branch_dicts[n_branch].items()), key=lambda x: x[1])])
-                
-            for act in top_acts:
-                train_act_sets.append(act)
-
-            ### Send the new action sequences to each process ###
-            comm.bcast(train_act_sets, controller)
-        else:
-            ### Incorporate the new action sequences into its list for further training ###
-            train_act_sets = comm.bcast(None, controller)
-
-    if rank == 0:
-        print('done')
+        if rank == 0:
+            print('done')
