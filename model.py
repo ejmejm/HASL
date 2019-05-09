@@ -1,5 +1,6 @@
 from tensorflow.keras.layers import Input, Dense, Conv2D, MaxPool2D, ZeroPadding2D, Flatten
 import tensorflow as tf
+import numpy as np
 
 class HASL():
     def __init__(self, sess, comm, controller, rank, state_shape=(42, 42), n_actions=12):
@@ -71,12 +72,26 @@ class HASL():
 
         return self.sess.run(self.enc_state, feed_dict={self.state_ph: state})
 
-    def train_encoder(self, states, state_ps, actions):
-        tf.run(self.update_im, feed_dict={ 
-                                            self.state_ph: states,
-                                            self.state_p_ph: state_ps,
-                                            self.act_ph: actions
-                                         })
+    def train_encoder(self, states, state_ps, actions, batch_size=1024):
+        formatted_states = np.expand_dims(np.stack(states), axis=-1)
+        formatted_state_ps = np.expand_dims(np.stack(state_ps), axis=-1)
+
+        correct = 0
+        for batch_idx in range(int(np.ceil(len(actions) / batch_size))):
+            start_idx = batch_idx * batch_size
+            end_idx = (batch_idx + 1) * batch_size
+            act_preds, loss, _ = self.sess.run([self.act_pred, self.loss_i, self.update_im], 
+                        feed_dict={ 
+                            self.state_ph: formatted_states[start_idx:end_idx],
+                            self.state_p_ph: formatted_state_ps[start_idx:end_idx],
+                            self.act_ph: actions[start_idx:end_idx]
+                        })
+            act_preds = np.argmax(act_preds, axis=1)
+            correct += sum([1 if x[0] == x[1] else 0 for x in zip(act_preds, actions[start_idx:end_idx])])
+
+        accuracy = correct / len(actions)
+
+        return accuracy
 
     def sync_weights(self):
         if self.rank == self.controller:

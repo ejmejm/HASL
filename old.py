@@ -6,7 +6,6 @@ import cv2
 from ludus.utils import discount_rewards
 import heapq
 import tensorflow as tf
-from model import HASL
 import multiprocessing
 
 # Super Mario stuff
@@ -40,7 +39,6 @@ def worker(action_sets, max_steps=1000):
     Performs the game simulation, and is called across all processes
     """
     train_data = []
-    full_data = []
     env = make_env()
     obs = env.reset()
     obs = filter_obs(obs)
@@ -51,28 +49,26 @@ def worker(action_sets, max_steps=1000):
         act_idx = np.random.randint(len(action_sets))
         act_set = action_sets[act_idx]
         
-        train_data.append([obs])
         step_reward = 0
         for act in act_set:
             obs_p, r, d, _ = env.step(act)
-            obs_p = filter_obs(obs_p)
-            full_data.append([obs, act, r, obs_p])
-            obs = obs_p
             step_reward += r
             step += 1
             if d or step >= max_steps:
                 break
         ep_reward += step_reward
         
-        train_data[-1].extend([act_set, step_reward, obs_p])
+        train_data.append([obs, act_set, step_reward])
+        
+        obs_p = filter_obs(obs_p)
+        train_data[-1].append(obs_p)
+        obs = obs_p
         
         if d:
             break
     
-    train_data = np.asarray(train_data)
-    full_data = np.asarray(full_data)
-
-    return train_data, full_data
+    train_data = np.array(train_data)
+    return train_data
 
 if __name__ == '__main__':
     ### Setp for MPI ###
@@ -83,13 +79,12 @@ if __name__ == '__main__':
 
     ### Define starting parameters ###
     n_epochs = 1000
-    n_train_batches = 64
+    n_train_batches = 20
     n_process_batches = int(n_train_batches / n_processes)
     top_frac = 0.1
     top_x = int(np.ceil(n_processes * top_frac))
     act_top_x = 2
     min_branch, max_branch = 2, 3
-    log_freq = 60
     train_act_sets = [[i] for i in range(0, 7)]
 
     init_logger('progress.log')
@@ -109,39 +104,23 @@ if __name__ == '__main__':
 
     # with use_device:
     with tf.Session(config=device_config) as sess:
-        hasl = HASL(sess, comm, controller, rank)
-
         for epoch in range(1, n_epochs+1):
             train_data = []
-            encoder_data = []
             for _ in range(n_process_batches):
                 ### Simulate more episodes to gain training data ###
                 if rank == controller:
-                    all_data = comm.gather(worker(train_act_sets), controller)
-                    new_train_data = [x[0] for x in all_data]
-                    train_data.extend(new_train_data)
-                    encoder_data.extend([x[1] for x in all_data])
+                    train_data.extend(comm.gather(worker(train_act_sets), controller))
                 else:
                     comm.gather(worker(train_act_sets), controller)
 
-            if rank == controller:
-                encoder_data = np.concatenate(encoder_data)
-                
+            print(np.array(train_data).shape)
+            print(train_data.shape)
             if rank == controller:
                 print(f'----- Epoch {epoch} -----')
 
-                if epoch % log_freq == 0:
+                if epoch % 10 == 0:
                     log(f'Epoch {epoch} train action sets:')
                     log(str(train_act_sets) + '\n')
-
-                ### Train reverse dynamics encoder model ###
-                assert encoder_data.shape[1] == 4
-                train_states = encoder_data[:, 0]
-                train_actions = encoder_data[:, 1]
-                train_state_ps = encoder_data[:, 3]
-
-                # loss = hasl.train_encoder(train_states, train_state_ps, train_actions)
-                # print(f'Inverse Dynamics Accuracy: {str(loss*100)[:5]}%')
 
                 ### Pull rewards from the training data ###
                 reward_list = []
@@ -154,10 +133,11 @@ if __name__ == '__main__':
                 max_reward = max(reward_list)
                 scaled_rewards = [r - max_reward for r in reward_list]
                 reward_sum = sum(scaled_rewards)
-                scaled_rewards = [max(r / reward_sum, 1e-9) for r in scaled_rewards]
+                scaled_rewards = [r / reward_sum for r in scaled_rewards]
 
                 selected_ids = np.random.choice(range(len(train_data)), size=top_x, replace=False, p=scaled_rewards)
                 top_data = [train_data[idx] for idx in selected_ids]
+
 
                 ### Count all the actions of specified sizes from the chosen episodes ###
                 strain_act_sets = set([tuple(x) for x in train_act_sets])
