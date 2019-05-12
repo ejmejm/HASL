@@ -53,8 +53,17 @@ class HASL():
                 self.value_loss = tf.reduce_mean(tf.square(self.rew_ph - tf.squeeze(self.value_op)))
                 self.value_update = self.optimizer.minimize(self.value_loss)
 
-    def choose_action(self, obs):
+    def choose_action(self, obs, batch_size=1024):
         return self.sess.run(self.act_out, feed_dict={self.obs_op: obs})
+
+    def train_policy(self, states, actions, rewards):
+        actions = [a[0] for a in actions]
+        states = np.vstack(states)
+
+        self.sess.run([self.policy_update, self.value_update],
+            feed_dict={self.obs_op: states,
+                self.act_ph: actions,
+                self.rew_ph: rewards})
 
     def create_encoder_ops(self, state_shape=(42, 42), n_actions=12):
         """

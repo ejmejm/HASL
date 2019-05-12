@@ -132,6 +132,7 @@ if __name__ == '__main__':
 
             if rank == controller:
                 encoder_data = np.concatenate(encoder_data)
+                cat_train_data = np.concatenate(train_data)
                 
             if rank == controller:
                 print(f'----- Epoch {epoch} -----')
@@ -148,6 +149,8 @@ if __name__ == '__main__':
 
                 accuracy = hasl.train_encoder(train_states, train_state_ps, train_actions)
                 print(f'Inverse Dynamics Accuracy: {str(accuracy*100)[:5]}%')
+
+                hasl.train_policy(cat_train_data[:,0], cat_train_data[:,1], cat_train_data[:,2])
 
                 ### Pull rewards and action sequences from the training data ###
                 reward_list = []
