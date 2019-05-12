@@ -8,11 +8,14 @@ import heapq
 import tensorflow as tf
 from model import HASL
 import multiprocessing
+import pickle
 
 # Super Mario stuff
 from nes_py.wrappers import BinarySpaceToDiscreteSpaceEnv
 import gym_super_mario_bros
 from gym_super_mario_bros.actions import COMPLEX_MOVEMENT
+
+OBS_DIM = 42
 
 def init_logger(lp):
     global log_path
@@ -30,12 +33,12 @@ def make_env():
     env = BinarySpaceToDiscreteSpaceEnv(env, COMPLEX_MOVEMENT)
     return env
 
-def filter_obs(obs, obs_shape=(42, 42)):
+def filter_obs(obs, obs_shape=(OBS_DIM, OBS_DIM)):
     obs = cv2.resize(obs, obs_shape, interpolation=cv2.INTER_LINEAR)
     obs = cv2.cvtColor(obs, cv2.COLOR_BGR2GRAY)
     return obs / 255
     
-def worker(action_sets, max_steps=1000):
+def worker(action_sets, hasl, max_steps=1000):
     """
     Performs the game simulation, and is called across all processes
     """
@@ -44,14 +47,16 @@ def worker(action_sets, max_steps=1000):
     env = make_env()
     obs = env.reset()
     obs = filter_obs(obs)
+    encoded_obs = hasl.apply_encoder(obs.reshape(1, OBS_DIM, OBS_DIM, 1))
     
     ep_reward = 0
     step = 0
     while step < max_steps:
-        act_idx = np.random.randint(len(action_sets))
-        act_set = action_sets[act_idx]
+        # act_idx = np.random.randint(len(action_sets))
+        # act_set = action_sets[act_idx]
+        act_set = [hasl.choose_action(encoded_obs)]
         
-        train_data.append([obs])
+        train_data.append([encoded_obs])
         step_reward = 0
         for act in act_set:
             obs_p, r, d, _ = env.step(act)
@@ -64,7 +69,8 @@ def worker(action_sets, max_steps=1000):
                 break
         ep_reward += step_reward
         
-        train_data[-1].extend([act_set, step_reward, obs_p])
+        encoded_obs = hasl.apply_encoder(obs.reshape(1, OBS_DIM, OBS_DIM, 1))
+        train_data[-1].extend([act_set, step_reward, encoded_obs])
         
         if d:
             break
@@ -83,7 +89,7 @@ if __name__ == '__main__':
 
     ### Define starting parameters ###
     n_epochs = 1000
-    n_train_batches = 64
+    n_train_batches = 4
     n_process_batches = int(n_train_batches / n_processes)
     top_frac = 0.1
     top_x = int(np.ceil(n_processes * top_frac))
@@ -117,12 +123,12 @@ if __name__ == '__main__':
             for _ in range(n_process_batches):
                 ### Simulate more episodes to gain training data ###
                 if rank == controller:
-                    all_data = comm.gather(worker(train_act_sets), controller)
+                    all_data = comm.gather(worker(train_act_sets, hasl), controller)
                     new_train_data = [x[0] for x in all_data]
                     train_data.extend(new_train_data)
                     encoder_data.extend([x[1] for x in all_data])
                 else:
-                    comm.gather(worker(train_act_sets), controller)
+                    comm.gather(worker(train_act_sets, hasl), controller)
 
             if rank == controller:
                 encoder_data = np.concatenate(encoder_data)
@@ -140,16 +146,35 @@ if __name__ == '__main__':
                 train_actions = encoder_data[:, 1]
                 train_state_ps = encoder_data[:, 3]
 
-                # loss = hasl.train_encoder(train_states, train_state_ps, train_actions)
-                # print(f'Inverse Dynamics Accuracy: {str(loss*100)[:5]}%')
+                accuracy = hasl.train_encoder(train_states, train_state_ps, train_actions)
+                print(f'Inverse Dynamics Accuracy: {str(accuracy*100)[:5]}%')
 
-                ### Pull rewards from the training data ###
+                ### Pull rewards and action sequences from the training data ###
                 reward_list = []
+                # action_seq_list = []
                 for i in range(len(train_data)):
                     reward_list.append(sum(train_data[i][:,2]))
+                    # action_seq_list.append(train_data[i][:,1])
 
                 print(f'Avg Reward: {np.mean(reward_list)}, Min: {np.min(reward_list)}, Max: {np.max(reward_list)}, Std: {np.std(reward_list)}')
-        
+
+                ### Calculate state differences ###
+                state_changes = []
+                ss = []
+                for ep in range(len(train_data)):
+                    real_step = 0
+                    for step in range(2, len(train_data[ep])):
+                        real_step += len(train_data[ep][step][1])
+                        ss.append([real_step, train_data[ep][step][0]])
+                        state_changes.append([real_step, train_data[ep][step][0] - train_data[ep][step-2][0]])
+
+                print(f'Count: {len(state_changes)}')
+                with open('state_changes.pickle', 'wb') as f:
+                    pickle.dump(state_changes, f)
+
+                with open('ss.pickle', 'wb') as f:
+                    pickle.dump(ss, f)
+
                 ### Use softmax on rewards to stochastically choose which episodes to pull actions from ###
                 max_reward = max(reward_list)
                 scaled_rewards = [r - max_reward for r in reward_list]
@@ -184,11 +209,13 @@ if __name__ == '__main__':
                 for act in top_acts:
                     train_act_sets.append(act)
 
-                ### Send the new action sequences to each process ###
+                ### Send the new action sequences to each process and sync models ###
                 comm.bcast(train_act_sets, controller)
+                hasl.sync_weights()
             else:
-                ### Incorporate the new action sequences into its list for further training ###
+                ### Incorporate the new action sequences into its list for further training and sync models ###
                 train_act_sets = comm.bcast(None, controller)
+                hasl.sync_weights()
 
         if rank == 0:
             print('done')

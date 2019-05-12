@@ -11,6 +11,7 @@ class HASL():
         self.create_phs(state_shape=state_shape)
         self.optimizer = tf.train.AdamOptimizer(learning_rate=1e-3)
         self.create_encoder_ops(state_shape=state_shape, n_actions=n_actions)
+        self.create_policy_ops()
         self.sess.run(tf.global_variables_initializer())
         self.sync_weights()
 
@@ -19,12 +20,47 @@ class HASL():
         self.state_ph = tf.placeholder(dtype=tf.float32, shape=(None, *list(state_shape), 1))
         self.state_p_ph = tf.placeholder(dtype=tf.float32, shape=(None, *list(state_shape), 1))
         self.act_ph = tf.placeholder(dtype=tf.int32, shape=(None,))
+        self.rew_ph = tf.placeholder(dtype=tf.float32, shape=(None,))
+
+    def create_policy_ops(self):
+        self.n_acts = 12
+
+        with tf.variable_scope('policy'):
+            # Creating a conv net for the policy and value estimator
+            self.obs_op = Input(shape=(self.enc_dim,))
+            dense1 = Dense(128, activation='relu')(self.obs_op)
+            act_dense = Dense(128, activation='relu')(dense1)
+            val_dense = Dense(128, activation='relu')(dense1)
+
+            # Output probability distribution over possible actions
+            self.act_probs_op = Dense(self.n_acts, activation='softmax')(act_dense)
+            self.act_out = tf.squeeze(tf.random.multinomial(tf.log(self.act_probs_op), 1))
+
+            # Output value of observed state
+            self.value_op = Dense(1)(val_dense)
+
+            self.act_masks = tf.one_hot(self.act_ph, self.n_acts, dtype=tf.float32)
+            self.log_probs = tf.log(self.act_probs_op)
+
+            self.advantages = self.rew_ph - self.value_op
+
+            self.resp_acts = tf.reduce_sum(self.act_masks *  self.log_probs, axis=1)
+            self.policy_loss = -tf.reduce_mean(self.resp_acts * self.advantages)
+
+            self.policy_update = self.optimizer.minimize(self.policy_loss)
+
+            with tf.control_dependencies([self.policy_update]):
+                self.value_loss = tf.reduce_mean(tf.square(self.rew_ph - tf.squeeze(self.value_op)))
+                self.value_update = self.optimizer.minimize(self.value_loss)
+
+    def choose_action(self, obs):
+        return self.sess.run(self.act_out, feed_dict={self.obs_op: obs})
 
     def create_encoder_ops(self, state_shape=(42, 42), n_actions=12):
         """
         Creates the encoder used for states
         """
-        enc_dim = 288 # Encoded Feature Dimension
+        self.enc_dim = 288 # Encoded Feature Dimension
 
         # State encoder layer ops
         with tf.variable_scope('encoder'):
@@ -80,7 +116,7 @@ class HASL():
         for batch_idx in range(int(np.ceil(len(actions) / batch_size))):
             start_idx = batch_idx * batch_size
             end_idx = (batch_idx + 1) * batch_size
-            act_preds, loss, _ = self.sess.run([self.act_pred, self.loss_i, self.update_im], 
+            act_preds, _ = self.sess.run([self.act_pred, self.update_im], 
                         feed_dict={ 
                             self.state_ph: formatted_states[start_idx:end_idx],
                             self.state_p_ph: formatted_state_ps[start_idx:end_idx],
