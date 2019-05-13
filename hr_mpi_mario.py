@@ -9,6 +9,7 @@ import tensorflow as tf
 from model import HASL
 import multiprocessing
 import pickle
+from sklearn.neighbors import LSHForest
 
 # Super Mario stuff
 from nes_py.wrappers import BinarySpaceToDiscreteSpaceEnv
@@ -80,6 +81,19 @@ def worker(action_sets, hasl, max_steps=1000):
 
     return train_data, full_data
 
+def find_neighbors(samples, all_data, n=500):
+    lshf = LSHForest(n_estimators=20, n_candidates=200,
+                 n_neighbors=n).fit(all_data)
+
+    neighbors = []
+    for sample in samples:
+        neighbors.append([])
+        sn = lshf.kneighbors(np.array(sample).reshape(1, -1))[1][0]
+        for n in sn:
+            neighbors[-1].append(all_data[n])
+
+    return np.asarray(neighbors)
+
 if __name__ == '__main__':
     ### Setp for MPI ###
     comm = MPI.COMM_WORLD
@@ -96,6 +110,7 @@ if __name__ == '__main__':
     act_top_x = 2
     min_branch, max_branch = 2, 3
     log_freq = 60
+    n_as_proposals = 5
     train_act_sets = [[i] for i in range(0, 7)]
 
     init_logger('progress.log')
@@ -117,9 +132,6 @@ if __name__ == '__main__':
     hasl = HASL(comm, controller, rank, sess_config=device_config)
 
     for epoch in range(1, n_epochs+1):
-        if epoch % 10 == 0:
-            hasl.set_act_seqs(12)
-
         train_data = []
         encoder_data = []
         for _ in range(n_process_batches):
@@ -152,6 +164,7 @@ if __name__ == '__main__':
             accuracy = hasl.train_encoder(train_states, train_state_ps, train_actions)
             print(f'Inverse Dynamics Accuracy: {str(accuracy*100)[:5]}%')
 
+            # TODO: Change the way the actions are passed in to train the policy
             hasl.train_policy(cat_train_data[:,0], cat_train_data[:,1], cat_train_data[:,2])
 
             ### Pull rewards and action sequences from the training data ###
@@ -165,20 +178,31 @@ if __name__ == '__main__':
 
             ### Calculate state differences ###
             state_changes = []
+            start_states = []
+            act_seqs = []
             ss = []
+            seq_len = 3
             for ep in range(len(train_data)):
                 real_step = 0
-                for step in range(2, len(train_data[ep])):
+                for step in range(seq_len, len(train_data[ep])):
                     real_step += len(train_data[ep][step][1])
                     ss.append([real_step, train_data[ep][step][0]])
-                    state_changes.append([real_step, train_data[ep][step][0] - train_data[ep][step-2][0]])
+                    # state_changes.append([real_step, train_data[ep][step][0] - train_data[ep][step-seq_len][0]])
+                    state_changes.append(train_data[ep][step][0] - train_data[ep][step-seq_len][0])
+                    start_states.append(train_data[ep][step-seq_len][0])
+                    act_seqs.append(train_data[ep][step-seq_len:step,1])
 
-            print(f'Count: {len(state_changes)}')
-            with open('state_changes.pickle', 'wb') as f:
-                pickle.dump(state_changes, f)
+            state_changes = np.asarray(state_changes).squeeze()
+            start_states = np.asarray(start_states).squeeze()
+            act_seqs = np.asarray(act_seqs)
+            print(state_changes.shape, start_states.shape, act_seqs.shape)
 
-            with open('ss.pickle', 'wb') as f:
-                pickle.dump(ss, f)
+            # print(f'Count: {len(state_changes)}')
+            # with open('state_changes.pickle', 'wb') as f:
+            #     pickle.dump(state_changes, f)
+
+            # with open('ss.pickle', 'wb') as f:
+            #     pickle.dump(ss, f)
 
             ### Use softmax on rewards to stochastically choose which episodes to pull actions from ###
             max_reward = max(reward_list)
@@ -189,12 +213,21 @@ if __name__ == '__main__':
             selected_ids = np.random.choice(range(len(train_data)), size=top_x, replace=False, p=scaled_rewards)
             top_data = [train_data[idx] for idx in selected_ids]
 
+            ### Gather and format data for action sequence proposals ###
+
+            state_change_samples = []
+            for i in range(n_as_proposals):
+                state_change_samples.append(state_changes[np.random.randint(len(state_changes))])
+
+            as_net_train_data = find_neighbors(state_change_samples, state_changes)
+
             ### Count all the actions of specified sizes from the chosen episodes ###
             strain_act_sets = set([tuple(x) for x in train_act_sets])
             branch_dicts = {}
             for seq_len in range(min_branch, max_branch+1):
                 count_dict = {}
                 for episode in top_data:
+                    # TODO: Change the way acts work after I make the seq nets pipeline
                     ep_acts = episode[:,1]
                     for step_idx in range(seq_len-1, len(ep_acts)):
                         new_act_set = tuple(np.concatenate(ep_acts[step_idx-seq_len+1:step_idx+1]))

@@ -48,7 +48,7 @@ class HASL():
             self.act_masks = tf.one_hot(self.act_ph, n_act_seqs, dtype=tf.float32)
             self.log_probs = tf.log(self.act_probs_op)
 
-            self.advantages = self.rew_ph - self.value_op
+            self.advantages = self.rew_ph - tf.squeeze(self.value_op)
 
             self.resp_acts = tf.reduce_sum(self.act_masks *  self.log_probs, axis=1)
             self.policy_loss = -tf.reduce_mean(self.resp_acts * self.advantages)
@@ -89,6 +89,7 @@ class HASL():
         return self.sess.run(self.act_out, feed_dict={self.obs_op: obs})
 
     def train_policy(self, states, actions, rewards):
+        # TODO: Change the way the actions are selected when training the policy
         actions = [a[0] for a in actions]
         states = np.vstack(states)
 
@@ -101,7 +102,7 @@ class HASL():
         """
         Creates the encoder used for states
         """
-        self.enc_dim = 288 # Encoded Feature Dimension
+        self.enc_dim = 128 # Encoded Feature Dimension
 
         # State encoder layer ops
         with tf.variable_scope('encoder'):
@@ -112,7 +113,6 @@ class HASL():
                 Conv2D(32, 3, strides=(2, 2), activation='elu'),
                 ZeroPadding2D(),
                 Conv2D(32, 3, strides=(2, 2), activation='elu'),
-                ZeroPadding2D(),
                 Conv2D(32, 3, strides=(2, 2), activation='elu'),
                 Flatten()
             ]
