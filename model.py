@@ -1,4 +1,5 @@
 from tensorflow.keras.layers import Input, Dense, Conv2D, MaxPool2D, ZeroPadding2D, Flatten
+from tensorflow import keras
 import tensorflow as tf
 import numpy as np
 
@@ -16,12 +17,63 @@ class HASL():
         self.state_shape = state_shape
         self.n_base_acts = n_base_acts
         self.n_act_seqs = n_act_seqs
+        self.n_curr_acts = n_act_seqs # Equal to n_act_seqs until the set_act_seqs has been called to update it
+        self.as_nets = []
         self.create_phs(state_shape=self.state_shape)
         self.optimizer = tf.train.AdamOptimizer(learning_rate=1e-3)
         self.create_encoder_ops(state_shape=state_shape, n_base_acts=self.n_base_acts)
         self.create_policy_ops(n_act_seqs=self.n_act_seqs)
         self.sess.run(tf.global_variables_initializer())
         self.sync_weights()
+
+    def create_as_net(self, obs, acts, n_acts=3, batch_size=32, n_epochs=200, test_frac=0.15):
+        scope_name = f'as_net_{self.n_act_seqs}'
+
+        with tf.variable_scope(scope_name):
+            act_seq_ph = tf.placeholder(dtype=tf.int32, shape=(None, n_acts))
+            flat_act_seqs = tf.reshape(act_seq_ph, (-1,))
+
+            dense = Dense(128, activation='relu')(self.obs_op)
+            act_probs = []
+            act_ohs = []
+            losses = []
+            for i in range(n_acts):
+                act_indices = tf.range(i, tf.shape(flat_act_seqs)[0], n_acts)
+                resp_acts = tf.gather(flat_act_seqs, act_indices)
+                act_ohs.append(tf.one_hot(resp_acts, self.n_curr_acts, dtype=tf.float32))
+                dense2 = Dense(64, activation='relu')(dense)
+                act_probs.append(Dense(self.n_curr_acts, activation=None)(dense2))
+                losses.append(tf.losses.softmax_cross_entropy(act_ohs[-1], act_probs[-1]))
+                
+            as_optimizer = tf.train.AdamOptimizer(learning_rate=1e-3)
+            total_loss = tf.math.add_n(losses)
+            as_update = as_optimizer.minimize(total_loss)
+
+        init_new_vars_ops = [x.initializer for x in tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES, scope=scope_name)]
+        self.sess.run(init_new_vars_ops)
+
+        # train_obs, test_obs = obs[:]
+
+        for epoch in range(n_epochs):
+            correct_preds = 0
+            total_preds = 0
+            for idx in range(0, len(obs), batch_size):
+                aps, _ = self.sess.run([act_probs, as_update], 
+                    feed_dict={
+                        self.obs_op: obs[idx:idx+batch_size],
+                        act_seq_ph: acts[idx:idx+batch_size]
+                    })
+
+                for i, ap in enumerate(aps):
+                    ids = np.argmax(ap, axis=1)
+                    correct_preds += (ids == acts[idx:idx+batch_size,i]).sum()
+                    total_preds += batch_size
+                # tl += loss[0]
+            # print('Loss:', tl)
+            print(correct_preds/total_preds)
+
+        # TODO: Add to list of act sequences
+        self.n_act_seqs += 1
 
     def create_phs(self, state_shape=(42, 42)):
         # Placeholders

@@ -78,10 +78,16 @@ def worker(action_sets, hasl, max_steps=1000):
     
     train_data = np.asarray(train_data)
     full_data = np.asarray(full_data)
+    
+    rewards = np.copy(full_data[:,2])
 
-    return train_data, full_data
+    # Discount rewards
+    train_data[:,2] = discount_rewards(train_data[:,2])
+    full_data[:,2] = discount_rewards(full_data[:,2])
 
-def find_neighbors(samples, all_data, n=500):
+    return train_data, full_data, rewards
+
+def find_neighbors(samples, all_data, n=500, return_idx=True):
     lshf = LSHForest(n_estimators=20, n_candidates=200,
                  n_neighbors=n).fit(all_data)
 
@@ -90,7 +96,10 @@ def find_neighbors(samples, all_data, n=500):
         neighbors.append([])
         sn = lshf.kneighbors(np.array(sample).reshape(1, -1))[1][0]
         for n in sn:
-            neighbors[-1].append(all_data[n])
+            if return_idx:
+                neighbors[-1].append(n)
+            else:
+                neighbors[-1].append(all_data[n])
 
     return np.asarray(neighbors)
 
@@ -105,12 +114,12 @@ if __name__ == '__main__':
     n_epochs = 1000
     n_train_batches = 8
     n_process_batches = int(n_train_batches / n_processes)
-    top_frac = 0.1
-    top_x = int(np.ceil(n_processes * top_frac))
+    top_x = 5
     act_top_x = 2
     min_branch, max_branch = 2, 3
     log_freq = 60
     n_as_proposals = 5
+    n_as_train_samples = 512
     train_act_sets = [[i] for i in range(0, 7)]
 
     init_logger('progress.log')
@@ -134,6 +143,7 @@ if __name__ == '__main__':
     for epoch in range(1, n_epochs+1):
         train_data = []
         encoder_data = []
+        all_rewards = []
         for _ in range(n_process_batches):
             ### Simulate more episodes to gain training data ###
             if rank == controller:
@@ -141,6 +151,7 @@ if __name__ == '__main__':
                 new_train_data = [x[0] for x in all_data]
                 train_data.extend(new_train_data)
                 encoder_data.extend([x[1] for x in all_data])
+                all_rewards.extend([sum(x[2]) for x in all_data])
             else:
                 comm.gather(worker(train_act_sets, hasl), controller)
 
@@ -156,6 +167,7 @@ if __name__ == '__main__':
                 log(str(train_act_sets) + '\n')
 
             ### Train reverse dynamics encoder model ###
+
             assert encoder_data.shape[1] == 4
             train_states = encoder_data[:, 0]
             train_actions = encoder_data[:, 1]
@@ -168,34 +180,51 @@ if __name__ == '__main__':
             hasl.train_policy(cat_train_data[:,0], cat_train_data[:,1], cat_train_data[:,2])
 
             ### Pull rewards and action sequences from the training data ###
-            reward_list = []
-            # action_seq_list = []
-            for i in range(len(train_data)):
-                reward_list.append(sum(train_data[i][:,2]))
-                # action_seq_list.append(train_data[i][:,1])
 
-            print(f'Avg Reward: {np.mean(reward_list)}, Min: {np.min(reward_list)}, Max: {np.max(reward_list)}, Std: {np.std(reward_list)}')
+            print(f'Avg Reward: {np.mean(all_rewards)}, Min: {np.min(all_rewards)}, Max: {np.max(all_rewards)}, Std: {np.std(all_rewards)}')
 
             ### Calculate state differences ###
+
             state_changes = []
             start_states = []
             act_seqs = []
-            ss = []
+            reward_list = []
+            # ss = []
             seq_len = 3
             for ep in range(len(train_data)):
                 real_step = 0
                 for step in range(seq_len, len(train_data[ep])):
                     real_step += len(train_data[ep][step][1])
-                    ss.append([real_step, train_data[ep][step][0]])
+                    # ss.append([real_step, train_data[ep][step][0]])
                     # state_changes.append([real_step, train_data[ep][step][0] - train_data[ep][step-seq_len][0]])
                     state_changes.append(train_data[ep][step][0] - train_data[ep][step-seq_len][0])
                     start_states.append(train_data[ep][step-seq_len][0])
                     act_seqs.append(train_data[ep][step-seq_len:step,1])
+                    reward_list.append(sum(train_data[ep][step-seq_len:step,2]))
 
             state_changes = np.asarray(state_changes).squeeze()
             start_states = np.asarray(start_states).squeeze()
             act_seqs = np.asarray(act_seqs)
-            print(state_changes.shape, start_states.shape, act_seqs.shape)
+
+            ### Use softmax on rewards to stochastically choose which episodes to pull actions from ###
+
+            zero_dist = -min(reward_list)
+            scaled_rewards = [r + zero_dist for r in reward_list]
+            total_reward = sum(scaled_rewards)
+            scaled_rewards = [r / total_reward for r in scaled_rewards]
+
+            top_ids = np.random.choice(range(len(scaled_rewards)), size=top_x, replace=False, p=scaled_rewards)
+            top_samples = [state_changes[i] for i in top_ids]
+
+            ### Gather and format data for action sequence proposals ###
+
+            as_net_train_data = find_neighbors(top_samples, state_changes, n=n_as_train_samples)
+            
+            obs = np.array([start_states[x] for x in as_net_train_data[0]])
+            acts = np.array([np.hstack(act_seqs[x]) for x in as_net_train_data[0]])
+            
+            if epoch % 10 == 0:
+                hasl.create_as_net(obs, acts)
 
             # print(f'Count: {len(state_changes)}')
             # with open('state_changes.pickle', 'wb') as f:
@@ -204,48 +233,45 @@ if __name__ == '__main__':
             # with open('ss.pickle', 'wb') as f:
             #     pickle.dump(ss, f)
 
-            ### Use softmax on rewards to stochastically choose which episodes to pull actions from ###
-            max_reward = max(reward_list)
-            scaled_rewards = [r - max_reward for r in reward_list]
-            reward_sum = sum(scaled_rewards)
-            scaled_rewards = [max(r / reward_sum, 1e-9) for r in scaled_rewards]
+            ### ------------ OLD SYSTEM ------------ ###
 
-            selected_ids = np.random.choice(range(len(train_data)), size=top_x, replace=False, p=scaled_rewards)
-            top_data = [train_data[idx] for idx in selected_ids]
+            # ### Use softmax on rewards to stochastically choose which episodes to pull actions from ###
+            # max_reward = max(reward_list)
+            # scaled_rewards = [r - max_reward for r in reward_list]
+            # reward_sum = sum(scaled_rewards)
+            # scaled_rewards = [max(r / reward_sum, 1e-9) for r in scaled_rewards]
 
-            ### Gather and format data for action sequence proposals ###
+            # selected_ids = np.random.choice(range(len(train_data)), size=top_x, replace=False, p=scaled_rewards)
+            # top_data = [train_data[idx] for idx in selected_ids]
 
-            state_change_samples = []
-            for i in range(n_as_proposals):
-                state_change_samples.append(state_changes[np.random.randint(len(state_changes))])
 
-            as_net_train_data = find_neighbors(state_change_samples, state_changes)
-
-            ### Count all the actions of specified sizes from the chosen episodes ###
-            strain_act_sets = set([tuple(x) for x in train_act_sets])
-            branch_dicts = {}
-            for seq_len in range(min_branch, max_branch+1):
-                count_dict = {}
-                for episode in top_data:
-                    # TODO: Change the way acts work after I make the seq nets pipeline
-                    ep_acts = episode[:,1]
-                    for step_idx in range(seq_len-1, len(ep_acts)):
-                        new_act_set = tuple(np.concatenate(ep_acts[step_idx-seq_len+1:step_idx+1]))
-                        if tuple(new_act_set) not in strain_act_sets:
-                            if new_act_set in count_dict:
-                                count_dict[new_act_set] += 1
-                            else:
-                                count_dict[new_act_set] = 1
+            # ### Count all the actions of specified sizes from the chosen episodes ###
+            # strain_act_sets = set([tuple(x) for x in train_act_sets])
+            # branch_dicts = {}
+            # for seq_len in range(min_branch, max_branch+1):
+            #     count_dict = {}
+            #     for episode in top_data:
+            #         # TODO: Change the way acts work after I make the seq nets pipeline
+            #         ep_acts = episode[:,1]
+            #         for step_idx in range(seq_len-1, len(ep_acts)):
+            #             new_act_set = tuple(np.concatenate(ep_acts[step_idx-seq_len+1:step_idx+1]))
+            #             if tuple(new_act_set) not in strain_act_sets:
+            #                 if new_act_set in count_dict:
+            #                     count_dict[new_act_set] += 1
+            #                 else:
+            #                     count_dict[new_act_set] = 1
                 
-                branch_dicts[seq_len] = count_dict
+            #     branch_dicts[seq_len] = count_dict
 
-            ### Choose the new action sequences to be added to be used ###
-            top_acts = []
-            for n_branch in range(min_branch, max_branch+1):
-                top_acts.extend([list(x[0]) for x in heapq.nlargest(act_top_x, list(branch_dicts[n_branch].items()), key=lambda x: x[1])])
+            # ### Choose the new action sequences to be added to be used ###
+            # top_acts = []
+            # for n_branch in range(min_branch, max_branch+1):
+            #     top_acts.extend([list(x[0]) for x in heapq.nlargest(act_top_x, list(branch_dicts[n_branch].items()), key=lambda x: x[1])])
                 
-            for act in top_acts:
-                train_act_sets.append(act)
+            # for act in top_acts:
+            #     train_act_sets.append(act)
+
+            ### ------------ OLD SYSTEM ------------ ###
 
             ### Send the new action sequences to each process and sync models ###
             comm.bcast(train_act_sets, controller)
