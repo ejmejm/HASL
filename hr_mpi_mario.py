@@ -223,6 +223,8 @@ if __name__ == '__main__':
             obs = np.array([start_states[x] for x in as_net_train_data[0]])
             acts = np.array([np.hstack(act_seqs[x]) for x in as_net_train_data[0]])
             
+            # TODO: Make an initial period where this doesn't happen for x epochs 
+            # so that the autoencoder has time to learn more stabely 
             if epoch % 10 == 0:
                 hasl.create_as_net(obs, acts)
 
@@ -232,46 +234,6 @@ if __name__ == '__main__':
 
             # with open('ss.pickle', 'wb') as f:
             #     pickle.dump(ss, f)
-
-            ### ------------ OLD SYSTEM ------------ ###
-
-            # ### Use softmax on rewards to stochastically choose which episodes to pull actions from ###
-            # max_reward = max(reward_list)
-            # scaled_rewards = [r - max_reward for r in reward_list]
-            # reward_sum = sum(scaled_rewards)
-            # scaled_rewards = [max(r / reward_sum, 1e-9) for r in scaled_rewards]
-
-            # selected_ids = np.random.choice(range(len(train_data)), size=top_x, replace=False, p=scaled_rewards)
-            # top_data = [train_data[idx] for idx in selected_ids]
-
-
-            # ### Count all the actions of specified sizes from the chosen episodes ###
-            # strain_act_sets = set([tuple(x) for x in train_act_sets])
-            # branch_dicts = {}
-            # for seq_len in range(min_branch, max_branch+1):
-            #     count_dict = {}
-            #     for episode in top_data:
-            #         # TODO: Change the way acts work after I make the seq nets pipeline
-            #         ep_acts = episode[:,1]
-            #         for step_idx in range(seq_len-1, len(ep_acts)):
-            #             new_act_set = tuple(np.concatenate(ep_acts[step_idx-seq_len+1:step_idx+1]))
-            #             if tuple(new_act_set) not in strain_act_sets:
-            #                 if new_act_set in count_dict:
-            #                     count_dict[new_act_set] += 1
-            #                 else:
-            #                     count_dict[new_act_set] = 1
-                
-            #     branch_dicts[seq_len] = count_dict
-
-            # ### Choose the new action sequences to be added to be used ###
-            # top_acts = []
-            # for n_branch in range(min_branch, max_branch+1):
-            #     top_acts.extend([list(x[0]) for x in heapq.nlargest(act_top_x, list(branch_dicts[n_branch].items()), key=lambda x: x[1])])
-                
-            # for act in top_acts:
-            #     train_act_sets.append(act)
-
-            ### ------------ OLD SYSTEM ------------ ###
 
             ### Send the new action sequences to each process and sync models ###
             comm.bcast(train_act_sets, controller)

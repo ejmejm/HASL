@@ -1,4 +1,4 @@
-from tensorflow.keras.layers import Input, Dense, Conv2D, MaxPool2D, ZeroPadding2D, Flatten
+from tensorflow.keras.layers import Input, Dense, Conv2D, MaxPool2D, ZeroPadding2D, Flatten, Dropout
 from tensorflow import keras
 import tensorflow as tf
 import numpy as np
@@ -137,8 +137,14 @@ class HASL():
             if 'policy/act_probs' not in pair[0].name:
                 self.sess.run(tf.assign(pair[0], pair[1]))
 
-    def choose_action(self, obs, batch_size=1024):
-        return self.sess.run(self.act_out, feed_dict={self.obs_op: obs})
+    def choose_action(self, obs, batch_size=1024, epsilon=0.1, possible_acts=None):
+        if possible_acts is None:
+            return self.sess.run(self.act_out, feed_dict={self.obs_op: obs})
+
+        if np.random.rand() < epsilon:
+            return np.random.choice(possible_acts)
+        else:
+            return self.sess.run(self.act_out, feed_dict={self.obs_op: obs})
 
     def train_policy(self, states, actions, rewards):
         # TODO: Change the way the actions are selected when training the policy
@@ -162,9 +168,11 @@ class HASL():
                 ZeroPadding2D(),
                 Conv2D(32, 3, strides=(2, 2), activation='elu'),
                 ZeroPadding2D(),
+                Dropout(0.2),
                 Conv2D(32, 3, strides=(2, 2), activation='elu'),
                 ZeroPadding2D(),
                 Conv2D(32, 3, strides=(2, 2), activation='elu'),
+                Dropout(0.2),
                 Conv2D(32, 3, strides=(2, 2), activation='elu'),
                 Flatten()
             ]
