@@ -4,7 +4,10 @@ import tensorflow as tf
 import numpy as np
 
 class HASL():
-    def __init__(self, comm, controller, rank, sess_config=None, state_shape=(42, 42), n_base_acts=12, n_act_seqs=12):
+    def __init__(self, comm, controller, rank, sess_config=None, 
+                 state_shape=(42, 42), n_base_acts=12, n_act_seqs=12,
+                 ppo_clip_val=0.2, ppo_val_coef=1., ppo_entropy_coef=0.01,
+                 ppo_iters=80, ppo_kl_limit=1.5):
         if sess_config is None:
             self.sess = tf.Session()
         else:
@@ -17,6 +20,11 @@ class HASL():
         self.state_shape = state_shape
         self.n_base_acts = n_base_acts
         self.n_act_seqs = n_act_seqs
+        self.clip_val = ppo_clip_val
+        self.val_coef = ppo_val_coef
+        self.entropy_coef = ppo_entropy_coef
+        self.ppo_iters = ppo_iters
+        self.target_kl = ppo_kl_limit
         self.n_curr_acts = n_act_seqs # Equal to n_act_seqs until the set_act_seqs has been called to update it
         self.as_nets = []
         self.create_phs(state_shape=self.state_shape)
@@ -97,19 +105,43 @@ class HASL():
             # Output value of observed state
             self.value_op = Dense(1)(val_dense)
 
+            ### Training Ops ###
+
             self.act_masks = tf.one_hot(self.act_ph, n_act_seqs, dtype=tf.float32)
             self.log_probs = tf.log(self.act_probs_op)
+            self.resp_acts = tf.reduce_sum(self.act_masks *  self.log_probs, axis=1)
 
             self.advantages = self.rew_ph - tf.squeeze(self.value_op)
 
-            self.resp_acts = tf.reduce_sum(self.act_masks *  self.log_probs, axis=1)
-            self.policy_loss = -tf.reduce_mean(self.resp_acts * self.advantages)
+            ### PPO Repeated Pass ###
 
-            self.policy_update = self.optimizer.minimize(self.policy_loss)
+            self.advatange_ph = tf.placeholder(dtype=tf.float32, shape=self.advantages.shape)
+            self.old_probs_ph = tf.placeholder(dtype=tf.float32, shape=self.resp_acts.shape)
+            
+            self.policy_ratio = self.resp_acts / self.old_probs_ph
+            self.clipped_ratio = tf.clip_by_value(self.policy_ratio, 1 - self.clip_val, 1 + self.clip_val)
 
-            with tf.control_dependencies([self.policy_update]):
-                self.value_loss = tf.reduce_mean(tf.square(self.rew_ph - tf.squeeze(self.value_op)))
-                self.value_update = self.optimizer.minimize(self.value_loss)
+            self.min_loss = tf.minimum(self.policy_ratio * self.advatange_ph, self.clipped_ratio * self.advatange_ph)
+        
+            self.optimizer = tf.train.AdamOptimizer()
+
+            ### Policy Update ###
+
+            self.kl_divergence = tf.reduce_mean(tf.log(self.old_probs_ph) - tf.log(self.resp_acts))
+            self.actor_loss = -tf.reduce_mean(self.min_loss)
+            self.actor_update = self.optimizer.minimize(self.actor_loss)
+
+            ### Value Update ###
+        
+            self.value_loss = tf.reduce_mean(tf.square(self.rew_ph - tf.squeeze(self.value_op)))
+            self.value_update = self.optimizer.minimize(self.value_loss)
+
+            ### Combined Update ###
+            
+            self.entropy = -tf.reduce_mean(tf.reduce_sum(self.act_probs_op * \
+                tf.log(1. / tf.clip_by_value(self.act_probs_op, 1e-8, 1.0)), axis=1))
+            self.combined_loss = self.actor_loss + self.val_coef * self.value_loss + self.entropy_coef * self.entropy
+            self.combined_update = self.optimizer.minimize(self.combined_loss)
 
     def set_act_seqs(self, n_act_seqs):
         self.n_act_seqs = n_act_seqs
@@ -151,10 +183,28 @@ class HASL():
         actions = [a[0] for a in actions]
         states = np.vstack(states)
 
-        self.sess.run([self.policy_update, self.value_update],
-            feed_dict={self.obs_op: states,
-                self.act_ph: actions,
-                self.rew_ph: rewards})
+        self.old_probs, self.old_advantages = self.sess.run([self.resp_acts, self.advantages], 
+                                feed_dict={self.obs_op: states,
+                                           self.act_ph: actions,
+                                           self.rew_ph: rewards})
+
+        for i in range(self.ppo_iters):
+            kl_div, _ = self.sess.run([self.kl_divergence, self.combined_update], 
+                            feed_dict={self.obs_op: states,
+                                       self.act_ph: actions,
+                                       self.rew_ph: rewards,
+                                       self.old_probs_ph: self.old_probs,
+                                       self.advatange_ph: self.old_advantages})
+            if kl_div > 1.5 * self.target_kl:
+                break
+        print(i)
+
+
+
+        # self.sess.run([self.policy_update, self.value_update],
+        #     feed_dict={self.obs_op: states,
+        #         self.act_ph: actions,
+        #         self.rew_ph: rewards})
 
     def create_encoder_ops(self, state_shape=(42, 42), n_base_acts=12):
         """

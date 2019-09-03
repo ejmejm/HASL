@@ -18,6 +18,7 @@ from gym_super_mario_bros.actions import COMPLEX_MOVEMENT
 
 OBS_DIM = 42
 
+
 def init_logger(lp):
     global log_path
     log_path = lp
@@ -25,21 +26,25 @@ def init_logger(lp):
     f = open(log_path, 'w+')
     f.close()
 
+
 def log(string):
     with open(log_path, 'a') as f:
         f.write(string + '\n')
+
 
 def make_env():
     env = gym_super_mario_bros.make('SuperMarioBros-v0')
     env = BinarySpaceToDiscreteSpaceEnv(env, COMPLEX_MOVEMENT)
     return env
 
+
 def filter_obs(obs, obs_shape=(OBS_DIM, OBS_DIM)):
     obs = cv2.resize(obs, obs_shape, interpolation=cv2.INTER_LINEAR)
     obs = cv2.cvtColor(obs, cv2.COLOR_BGR2GRAY)
     return obs / 255
-    
-def worker(action_sets, hasl, max_steps=1000):
+
+
+def worker(action_sets, hasl, max_steps=1000, act_epsilon=0.1):
     """
     Performs the game simulation, and is called across all processes
     """
@@ -49,14 +54,15 @@ def worker(action_sets, hasl, max_steps=1000):
     obs = env.reset()
     obs = filter_obs(obs)
     encoded_obs = hasl.apply_encoder(obs.reshape(1, OBS_DIM, OBS_DIM, 1))
-    
+
     ep_reward = 0
     step = 0
     while step < max_steps:
         # act_idx = np.random.randint(len(action_sets))
         # act_set = action_sets[act_idx]
-        act_set = [hasl.choose_action(encoded_obs, epsilon=0.1, possible_acts=list(range(env.action_space.n)))]
-        
+        act_set = [hasl.choose_action(
+            encoded_obs, epsilon=act_epsilon, possible_acts=list(range(env.action_space.n)))]
+
         train_data.append([encoded_obs])
         step_reward = 0
         for act in act_set:
@@ -69,27 +75,28 @@ def worker(action_sets, hasl, max_steps=1000):
             if d or step >= max_steps:
                 break
         ep_reward += step_reward
-        
+
         encoded_obs = hasl.apply_encoder(obs.reshape(1, OBS_DIM, OBS_DIM, 1))
         train_data[-1].extend([act_set, step_reward, encoded_obs])
-        
+
         if d:
             break
-    
+
     train_data = np.asarray(train_data)
     full_data = np.asarray(full_data)
-    
-    rewards = np.copy(full_data[:,2])
+
+    rewards = np.copy(full_data[:, 2])
 
     # Discount rewards
-    train_data[:,2] = discount_rewards(train_data[:,2])
-    full_data[:,2] = discount_rewards(full_data[:,2])
+    train_data[:, 2] = discount_rewards(train_data[:, 2])
+    full_data[:, 2] = discount_rewards(full_data[:, 2])
 
     return train_data, full_data, rewards
 
+
 def find_neighbors(samples, all_data, n=500, return_idx=True):
     lshf = LSHForest(n_estimators=20, n_candidates=200,
-                 n_neighbors=n).fit(all_data)
+                     n_neighbors=n).fit(all_data)
 
     neighbors = []
     for sample in samples:
@@ -102,6 +109,7 @@ def find_neighbors(samples, all_data, n=500, return_idx=True):
                 neighbors[-1].append(all_data[n])
 
     return np.asarray(neighbors)
+
 
 if __name__ == '__main__':
     ### Setp for MPI ###
@@ -120,6 +128,9 @@ if __name__ == '__main__':
     log_freq = 60
     n_as_proposals = 5
     n_as_train_samples = 512
+    rand_explore_epochs = 10
+    act_epsilon = 1
+    target_act_epsilon = 0.1
     train_act_sets = [[i] for i in range(0, 7)]
 
     init_logger('progress.log')
@@ -141,24 +152,28 @@ if __name__ == '__main__':
     hasl = HASL(comm, controller, rank, sess_config=device_config)
 
     for epoch in range(1, n_epochs+1):
+        if epoch > rand_explore_epochs:
+            act_epsilon = target_act_epsilon
+
         train_data = []
         encoder_data = []
         all_rewards = []
         for _ in range(n_process_batches):
             ### Simulate more episodes to gain training data ###
             if rank == controller:
-                all_data = comm.gather(worker(train_act_sets, hasl), controller)
+                all_data = comm.gather(
+                    worker(train_act_sets, hasl, act_epsilon=act_epsilon), controller)
                 new_train_data = [x[0] for x in all_data]
                 train_data.extend(new_train_data)
                 encoder_data.extend([x[1] for x in all_data])
                 all_rewards.extend([sum(x[2]) for x in all_data])
             else:
-                comm.gather(worker(train_act_sets, hasl), controller)
+                comm.gather(worker(train_act_sets, hasl, act_epsilon=act_epsilon), controller)
 
         if rank == controller:
             encoder_data = np.concatenate(encoder_data)
             cat_train_data = np.concatenate(train_data)
-            
+
         if rank == controller:
             print(f'----- Epoch {epoch} -----')
 
@@ -173,15 +188,18 @@ if __name__ == '__main__':
             train_actions = encoder_data[:, 1]
             train_state_ps = encoder_data[:, 3]
 
-            accuracy = hasl.train_encoder(train_states, train_state_ps, train_actions)
+            accuracy = hasl.train_encoder(
+                train_states, train_state_ps, train_actions)
             print(f'Inverse Dynamics Accuracy: {str(accuracy*100)[:5]}%')
 
             # TODO: Change the way the actions are passed in to train the policy
-            hasl.train_policy(cat_train_data[:,0], cat_train_data[:,1], cat_train_data[:,2])
+            hasl.train_policy(
+                cat_train_data[:, 0], cat_train_data[:, 1], cat_train_data[:, 2])
 
             ### Pull rewards and action sequences from the training data ###
 
-            print(f'Avg Reward: {np.mean(all_rewards)}, Min: {np.min(all_rewards)}, Max: {np.max(all_rewards)}, Std: {np.std(all_rewards)}')
+            print(
+                f'Avg Reward: {np.mean(all_rewards)}, Min: {np.min(all_rewards)}, Max: {np.max(all_rewards)}, Std: {np.std(all_rewards)}')
 
             ### Calculate state differences ###
 
@@ -197,10 +215,12 @@ if __name__ == '__main__':
                     real_step += len(train_data[ep][step][1])
                     # ss.append([real_step, train_data[ep][step][0]])
                     # state_changes.append([real_step, train_data[ep][step][0] - train_data[ep][step-seq_len][0]])
-                    state_changes.append(train_data[ep][step][0] - train_data[ep][step-seq_len][0])
+                    state_changes.append(
+                        train_data[ep][step][0] - train_data[ep][step-seq_len][0])
                     start_states.append(train_data[ep][step-seq_len][0])
-                    act_seqs.append(train_data[ep][step-seq_len:step,1])
-                    reward_list.append(sum(train_data[ep][step-seq_len:step,2]))
+                    act_seqs.append(train_data[ep][step-seq_len:step, 1])
+                    reward_list.append(
+                        sum(train_data[ep][step-seq_len:step, 2]))
 
             state_changes = np.asarray(state_changes).squeeze()
             start_states = np.asarray(start_states).squeeze()
@@ -213,18 +233,21 @@ if __name__ == '__main__':
             total_reward = sum(scaled_rewards)
             scaled_rewards = [r / total_reward for r in scaled_rewards]
 
-            top_ids = np.random.choice(range(len(scaled_rewards)), size=top_x, replace=False, p=scaled_rewards)
+            top_ids = np.random.choice(
+                range(len(scaled_rewards)), size=top_x, replace=False, p=scaled_rewards)
             top_samples = [state_changes[i] for i in top_ids]
 
             ### Gather and format data for action sequence proposals ###
 
-            as_net_train_data = find_neighbors(top_samples, state_changes, n=n_as_train_samples)
-            
+            as_net_train_data = find_neighbors(
+                top_samples, state_changes, n=n_as_train_samples)
+
             obs = np.array([start_states[x] for x in as_net_train_data[0]])
-            acts = np.array([np.hstack(act_seqs[x]) for x in as_net_train_data[0]])
-            
-            # TODO: Make an initial period where this doesn't happen for x epochs 
-            # so that the autoencoder has time to learn more stabely 
+            acts = np.array([np.hstack(act_seqs[x])
+                             for x in as_net_train_data[0]])
+
+            # TODO: Make an initial period where this doesn't happen for x epochs
+            # so that the autoencoder has time to learn more stabely
             if epoch % 10 == 0:
                 hasl.create_as_net(obs, acts)
 
