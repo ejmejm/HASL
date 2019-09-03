@@ -55,7 +55,7 @@ def worker(action_sets, hasl, max_steps=1000):
     while step < max_steps:
         # act_idx = np.random.randint(len(action_sets))
         # act_set = action_sets[act_idx]
-        act_set = [hasl.choose_action(encoded_obs)]
+        act_set = [hasl.choose_action(encoded_obs, epsilon=0.1, possible_acts=list(range(env.action_space.n)))]
         
         train_data.append([encoded_obs])
         step_reward = 0
