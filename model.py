@@ -169,6 +169,7 @@ class HASL():
             if 'policy/act_probs' not in pair[0].name:
                 self.sess.run(tf.assign(pair[0], pair[1]))
 
+    # TODO: This function looks weird
     def choose_action(self, obs, batch_size=1024, epsilon=0.1, possible_acts=None):
         if possible_acts is None:
             return self.sess.run(self.act_out, feed_dict={self.obs_op: obs})

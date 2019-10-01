@@ -18,6 +18,27 @@ from gym_super_mario_bros.actions import COMPLEX_MOVEMENT
 
 OBS_DIM = 42
 
+class ObsStack():
+    def __init__(self, obs_shape, stack_size=4):
+        self.expected_shape = tuple(obs_shape)
+        self.stack_size = stack_size
+        self.stack = np.zeros(shape=list(obs_shape)+[stack_size])
+
+    def push(self, obs):
+        assert obs.shape == self.expected_shape
+        assert type(obs) == list or type(obs) == np.ndarray
+
+        if type(obs) == list:
+            obs = np.asarray(obs)
+
+        self.stack[..., 1:] = self.stack[..., :-1]
+        self.stack[..., 0] = obs
+
+    def get_stack(self):
+        return self.stack
+
+    def get_flat_stack(self):
+        return self.stack.reshape(-1)
 
 def init_logger(lp):
     global log_path
@@ -26,17 +47,14 @@ def init_logger(lp):
     f = open(log_path, 'w+')
     f.close()
 
-
 def log(string):
     with open(log_path, 'a') as f:
         f.write(string + '\n')
-
 
 def make_env():
     env = gym_super_mario_bros.make('SuperMarioBros-v0')
     env = BinarySpaceToDiscreteSpaceEnv(env, COMPLEX_MOVEMENT)
     return env
-
 
 def filter_obs(obs, obs_shape=(OBS_DIM, OBS_DIM)):
     obs = cv2.resize(obs, obs_shape, interpolation=cv2.INTER_LINEAR)
@@ -44,26 +62,48 @@ def filter_obs(obs, obs_shape=(OBS_DIM, OBS_DIM)):
     return obs / 255
 
 
-def worker(action_sets, hasl, max_steps=1000, act_epsilon=0.1):
+def worker(action_sets, hasl, max_steps=1000, act_epsilon=0.1, obs_stack_size=4):
     """
     Performs the game simulation, and is called across all processes
+
+    Returns:
+        train_data (np.ndarray): Array with the format, [[enc_ obs_stack, act_set, step_reward, encoded_obs], ...].
+            The array contains an entry for every high-level step.
+            enc_obs_stack: Flattened stack of n encoded observations.
+            act_set: `list` of low-level actions taken in the high-level step.
+            step_reward: Reward gained over the entire high-level step after being discounted.
+            encoded_obs: Resulting, encoded state from taking act_set actions given obs_stack.
+
+        full_data (np.ndarray): Array with the format, [[obs, act, r, obs_p], ...].
+            The array contains an entry for every low-level step.
+            obs: Filtered (but not encoded) observation at the beginning of the step.
+            act: `int` representing the low-level action taken over the step.
+            r: Reward gained for the low-level step after being discounted.
+            obs_p: Resulting, fitlered (but not encoded) state from taking act in state obs.
+
+        rewards (np.ndarray): Array containing the low-level rewards at each step.
     """
     train_data = []
     full_data = []
     env = make_env()
+
     obs = env.reset()
     obs = filter_obs(obs)
     encoded_obs = hasl.apply_encoder(obs.reshape(1, OBS_DIM, OBS_DIM, 1))
+    obs_stack = ObsStack(encoded_obs.shape, obs_stack_size)
+    obs_stack.push(encoded_obs)
 
     ep_reward = 0
     step = 0
     while step < max_steps:
         # act_idx = np.random.randint(len(action_sets))
         # act_set = action_sets[act_idx]
+        full_obs = obs_stack.get_flat_stack().reshape(1, -1)
+        # TODO: The method for generating act_sets seems strange
         act_set = [hasl.choose_action(
-            encoded_obs, epsilon=act_epsilon, possible_acts=list(range(env.action_space.n)))]
+            full_obs, epsilon=act_epsilon, possible_acts=list(range(env.action_space.n)))]
 
-        train_data.append([encoded_obs])
+        train_data.append([full_obs])
         step_reward = 0
         for act in act_set:
             obs_p, r, d, _ = env.step(act)
@@ -78,8 +118,9 @@ def worker(action_sets, hasl, max_steps=1000, act_epsilon=0.1):
 
         encoded_obs = hasl.apply_encoder(obs.reshape(1, OBS_DIM, OBS_DIM, 1))
         train_data[-1].extend([act_set, step_reward, encoded_obs])
+        obs_stack.push(encoded_obs)
 
-        if d:
+        if d or step >= max_steps:
             break
 
     train_data = np.asarray(train_data)
@@ -128,7 +169,7 @@ if __name__ == '__main__':
     log_freq = 60
     n_as_proposals = 5
     n_as_train_samples = 512
-    rand_explore_epochs = 10
+    rand_explore_epochs = 50
     act_epsilon = 1
     target_act_epsilon = 0.1
     train_act_sets = [[i] for i in range(0, 7)]
@@ -174,6 +215,10 @@ if __name__ == '__main__':
             encoder_data = np.concatenate(encoder_data)
             cat_train_data = np.concatenate(train_data)
 
+
+        ### End of data gathering, start of training ###
+
+ 
         if rank == controller:
             print(f'----- Epoch {epoch} -----')
 
