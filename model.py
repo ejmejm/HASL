@@ -5,9 +5,9 @@ import numpy as np
 
 class HASL():
     def __init__(self, comm, controller, rank, sess_config=None, 
-                 state_shape=(42, 42), n_base_acts=12, n_act_seqs=12,
-                 ppo_clip_val=0.2, ppo_val_coef=1., ppo_entropy_coef=0.01,
-                 ppo_iters=80, ppo_kl_limit=1.5):
+                 state_shape=(42, 42), state_depth=1, n_base_acts=12,
+                 n_act_seqs=12, ppo_clip_val=0.2, ppo_val_coef=1.,
+                 ppo_entropy_coef=0.01, ppo_iters=80, ppo_kl_limit=1.5):
         if sess_config is None:
             self.sess = tf.Session()
         else:
@@ -18,6 +18,7 @@ class HASL():
         self.rank = rank
         self.sess_config = sess_config
         self.state_shape = state_shape
+        self.state_depth = state_depth
         self.n_base_acts = n_base_acts
         self.n_act_seqs = n_act_seqs
         self.clip_val = ppo_clip_val
@@ -27,7 +28,7 @@ class HASL():
         self.target_kl = ppo_kl_limit
         self.n_curr_acts = n_act_seqs # Equal to n_act_seqs until the set_act_seqs has been called to update it
         self.as_nets = []
-        self.create_phs(state_shape=self.state_shape)
+        self.create_phs(state_shape=self.state_shape, state_depth=state_depth)
         self.optimizer = tf.train.AdamOptimizer(learning_rate=1e-3)
         self.create_encoder_ops(state_shape=state_shape, n_base_acts=self.n_base_acts)
         self.create_policy_ops(n_act_seqs=self.n_act_seqs)
@@ -83,10 +84,10 @@ class HASL():
         # TODO: Add to list of act sequences
         self.n_act_seqs += 1
 
-    def create_phs(self, state_shape=(42, 42)):
+    def create_phs(self, state_shape=(42, 42), state_depth=1):
         # Placeholders
-        self.state_ph = tf.placeholder(dtype=tf.float32, shape=(None, *list(state_shape), 1))
-        self.state_p_ph = tf.placeholder(dtype=tf.float32, shape=(None, *list(state_shape), 1))
+        self.state_ph = tf.placeholder(dtype=tf.float32, shape=(None, *list(state_shape), state_depth))
+        self.state_p_ph = tf.placeholder(dtype=tf.float32, shape=(None, *list(state_shape), state_depth))
         self.act_ph = tf.placeholder(dtype=tf.int32, shape=(None,))
         self.rew_ph = tf.placeholder(dtype=tf.float32, shape=(None,))
 
@@ -261,8 +262,8 @@ class HASL():
         return self.sess.run(self.enc_state, feed_dict={self.state_ph: state})
 
     def train_encoder(self, states, state_ps, actions, batch_size=1024):
-        formatted_states = np.expand_dims(np.stack(states), axis=-1)
-        formatted_state_ps = np.expand_dims(np.stack(state_ps), axis=-1)
+        formatted_states = np.stack(states)
+        formatted_state_ps = np.stack(state_ps)
 
         correct = 0
         for batch_idx in range(int(np.ceil(len(actions) / batch_size))):

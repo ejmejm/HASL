@@ -17,7 +17,7 @@ import gym_super_mario_bros
 from gym_super_mario_bros.actions import COMPLEX_MOVEMENT
 
 OBS_DIM = 42
-OBS_DEPTH = 4
+
 
 class ObsStack():
     def __init__(self, obs_shape, stack_size=4, fill_first=True):
@@ -51,14 +51,14 @@ class ObsStack():
 
         if self.fill_first:
             self.fill_first = False
-            for _ in range(self.stack_size - 1):
+            for _ in range(stack_size - 1):
                 self.push(obs)
 
     def get_stack(self):
-        return self.stack.copy()
+        return self.stack
 
     def get_flat_stack(self):
-        return self.stack.copy().reshape(-1)
+        return self.stack.reshape(-1)
 
 
 def init_logger(lp):
@@ -93,7 +93,7 @@ def worker(action_sets, hasl, max_steps=1000, act_epsilon=0.1, obs_stack_size=4)
     Returns:
         train_data (np.ndarray): Array with the format, [[enc_ obs_stack, act_set, step_reward, encoded_obs], ...].
             The array contains an entry for every high-level step.
-            enc_obs_stack: Encoded stack of n observations, where the shape = output shape of encoder.
+            enc_obs_stack: Flattened stack of n encoded observations.
             act_set: `list` of low-level actions taken in the high-level step.
             step_reward: Reward gained over the entire high-level step after being discounted.
             encoded_obs: Resulting, encoded state from taking act_set actions given obs_stack.
@@ -113,31 +113,26 @@ def worker(action_sets, hasl, max_steps=1000, act_epsilon=0.1, obs_stack_size=4)
 
     obs = env.reset()
     obs = filter_obs(obs)
-    h_obs_stack = ObsStack(obs.shape, obs_stack_size) # High-level obs stack
-    h_obs_stack.push(obs)
-    enc_full_obs = hasl.apply_encoder([h_obs_stack.get_stack()])[0]
+    encoded_obs = hasl.apply_encoder(obs.reshape(1, OBS_DIM, OBS_DIM, 1))
+    obs_stack = ObsStack(encoded_obs.shape, obs_stack_size)
+    obs_stack.push(encoded_obs)
 
-    l_obs_stack = ObsStack(obs.shape, obs_stack_size) # Low-level obs stack
-    l_obs_stack.push(obs)
-    
     ep_reward = 0
     step = 0
     while step < max_steps:
         # act_idx = np.random.randint(len(action_sets))
         # act_set = action_sets[act_idx]
-
+        full_obs = obs_stack.get_flat_stack().reshape(1, -1)
         # TODO: The method for generating act_sets seems strange
         act_set = [hasl.choose_action(
-            enc_full_obs, epsilon=act_epsilon, possible_acts=list(range(env.action_space.n)))]
+            full_obs, epsilon=act_epsilon, possible_acts=list(range(env.action_space.n)))]
 
-        train_data.append([enc_full_obs])
+        train_data.append([full_obs])
         step_reward = 0
         for act in act_set:
-            full_data.append([l_obs_stack.get_stack()])
             obs_p, r, d, _ = env.step(act)
             obs_p = filter_obs(obs_p)
-            l_obs_stack.push(obs_p)
-            full_data[-1].extend([act, r, l_obs_stack.get_stack()])
+            full_data.append([obs, act, r, obs_p])
             obs = obs_p
             step_reward += r
             step += 1
@@ -145,9 +140,9 @@ def worker(action_sets, hasl, max_steps=1000, act_epsilon=0.1, obs_stack_size=4)
                 break
         ep_reward += step_reward
 
-        h_obs_stack.push(obs)
-        enc_full_obs = hasl.apply_encoder([h_obs_stack.get_stack()])[0]
-        train_data[-1].extend([act_set, step_reward, enc_full_obs])
+        encoded_obs = hasl.apply_encoder(obs.reshape(1, OBS_DIM, OBS_DIM, 1))
+        train_data[-1].extend([act_set, step_reward, encoded_obs])
+        obs_stack.push(encoded_obs)
 
         if d or step >= max_steps:
             break
@@ -219,7 +214,7 @@ if __name__ == '__main__':
         # use_device = tf.device(f'/cpu:{rank % n_cpus}')
 
     # with use_device:
-    hasl = HASL(comm, controller, rank, state_depth=OBS_DEPTH, sess_config=device_config)
+    hasl = HASL(comm, controller, rank, state_depth=4, sess_config=device_config)
 
     for epoch in range(1, n_epochs+1):
         if epoch > rand_explore_epochs:
@@ -232,14 +227,14 @@ if __name__ == '__main__':
             ### Simulate more episodes to gain training data ###
             if rank == controller:
                 all_data = comm.gather(
-                    worker(train_act_sets, hasl, act_epsilon=act_epsilon, obs_stack_size=OBS_DEPTH), controller)
+                    worker(train_act_sets, hasl, act_epsilon=act_epsilon), controller)
                 new_train_data = [x[0] for x in all_data]
                 train_data.extend(new_train_data)
                 encoder_data.extend([x[1] for x in all_data])
                 all_rewards.extend([sum(x[2]) for x in all_data])
             else:
-                comm.gather(worker(train_act_sets, hasl, act_epsilon=act_epsilon,
-                                   obs_stack_size=OBS_DEPTH), controller)
+                comm.gather(worker(train_act_sets, hasl,
+                                   act_epsilon=act_epsilon), controller)
 
         if rank == controller:
             encoder_data = np.concatenate(encoder_data)
@@ -256,7 +251,7 @@ if __name__ == '__main__':
 
             ### Train reverse dynamics encoder model ###
 
-            assert encoder_data.shape[1] == 4, 'The encoder data must have a shape of (?, 4)!'
+            assert encoder_data.shape[1] == 4, 'The ecoder data must have a shape of (?, 4)!'
             train_states = encoder_data[:, 0]
             train_actions = encoder_data[:, 1]
             train_state_ps = encoder_data[:, 3]
