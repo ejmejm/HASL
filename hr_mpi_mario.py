@@ -21,6 +21,19 @@ OBS_DIM = 42
 
 class ObsStack():
     def __init__(self, obs_shape, stack_size=4, fill_first=True):
+        """
+        Stack of observations that only keeps n observations at a time.
+
+        Args:
+            obs_shape (tuple): Shape of individual observations inserted
+                into the stack.
+            stack_size (int): Max number of observations that can be pushed
+                into the stack before the oldest observations get replaced.
+            fill_first (bool): The stack is always initialized to all zeros.
+                When this variable is true, the very first push of an observation
+                will be pushed `stack_size` times to fill the stack.
+
+        """
         self.expected_shape = tuple(obs_shape)
         self.stack_size = stack_size
         self.stack = np.zeros(shape=list(obs_shape)+[stack_size])
@@ -35,6 +48,11 @@ class ObsStack():
 
         self.stack[..., 1:] = self.stack[..., :-1]
         self.stack[..., 0] = obs
+
+        if self.fill_first:
+            self.fill_first = False
+            for _ in range(stack_size - 1):
+                self.push(obs)
 
     def get_stack(self):
         return self.stack
@@ -70,7 +88,7 @@ def filter_obs(obs, obs_shape=(OBS_DIM, OBS_DIM)):
 
 def worker(action_sets, hasl, max_steps=1000, act_epsilon=0.1, obs_stack_size=4):
     """
-    Performs the game simulation, and is called across all processes
+    Performs the game simulation, and is called across all processes.
 
     Returns:
         train_data (np.ndarray): Array with the format, [[enc_ obs_stack, act_set, step_reward, encoded_obs], ...].
@@ -79,7 +97,6 @@ def worker(action_sets, hasl, max_steps=1000, act_epsilon=0.1, obs_stack_size=4)
             act_set: `list` of low-level actions taken in the high-level step.
             step_reward: Reward gained over the entire high-level step after being discounted.
             encoded_obs: Resulting, encoded state from taking act_set actions given obs_stack.
-
         full_data (np.ndarray): Array with the format, [[obs, act, r, obs_p], ...].
             The array contains an entry for every low-level step.
             obs: Filtered (but not encoded) observation at the beginning of the step.
