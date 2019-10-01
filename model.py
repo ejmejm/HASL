@@ -217,14 +217,14 @@ class HASL():
         with tf.variable_scope('encoder'):
             self.enc_layers = [
                 ZeroPadding2D(),
-                Conv2D(32, 3, strides=(2, 2), activation='elu'),
+                Conv2D(32, 3, strides=(2, 2), activation='relu'),
                 ZeroPadding2D(),
                 Dropout(0.2),
-                Conv2D(32, 3, strides=(2, 2), activation='elu'),
+                Conv2D(32, 3, strides=(2, 2), activation='relu'),
                 ZeroPadding2D(),
-                Conv2D(32, 3, strides=(2, 2), activation='elu'),
+                Conv2D(32, 3, strides=(2, 2), activation='relu'),
                 Dropout(0.2),
-                Conv2D(32, 3, strides=(2, 2), activation='elu'),
+                Conv2D(32, 3, strides=(2, 2), activation='relu'),
                 Flatten()
             ]
 
@@ -240,7 +240,7 @@ class HASL():
         # Inverse Dynamics Model
         with tf.variable_scope('inverse_model'):
             self.state_state_pair = tf.concat([self.enc_state, self.enc_state_p], axis=1)
-            self.im_dense = Dense(256, activation='elu')(self.state_state_pair)
+            self.im_dense = Dense(256, activation='relu')(self.state_state_pair)
             self.act_pred = Dense(n_base_acts, activation='softmax', use_bias=False)(self.im_dense)
 
         # State encoder train ops
