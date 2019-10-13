@@ -16,8 +16,8 @@ from nes_py.wrappers import BinarySpaceToDiscreteSpaceEnv
 import gym_super_mario_bros
 from gym_super_mario_bros.actions import COMPLEX_MOVEMENT
 
-OBS_DIM = 84
-OBS_DEPTH = 4
+OBS_DIM = 80 # Must be a multiple of 2^4 with the current mdoel
+OBS_DEPTH = 1
 
 class ObsStack():
     def __init__(self, obs_shape, stack_size=4, fill_first=True):
@@ -264,16 +264,18 @@ if __name__ == '__main__':
             train_actions = encoder_data[:, 1]
             train_state_ps = encoder_data[:, 3]
 
-            import matplotlib.pyplot as plt
+            # import matplotlib.pyplot as plt
 
-            # for i in range(3, -1, -1):
+            # for i in range(3, 0, -1):
             #     print(train_state_ps[100].shape)
-            #     plt.imshow(train_state_ps[100][:, :, i])
+            #     print(train_actions[i])
+            #     plt.imshow(train_state_ps[100][:, :, i-1] - train_state_ps[100][:, :, i])
             #     plt.show()
 
-            accuracy = hasl.train_encoder(
-                train_states, train_state_ps, train_actions)
-            print(f'Inverse Dynamics Accuracy: {str(accuracy*100)[:5]}%')
+            train_states = [s[:, :, 0] for s in train_states]
+
+            loss = hasl.train_encoder(train_states, batch_size=128)
+            print(f'Inverse Dynamics Accuracy: {str(loss)[:5]}%')
 
             
 

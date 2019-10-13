@@ -1,4 +1,4 @@
-from tensorflow.keras.layers import Input, Dense, Conv2D, MaxPool2D, ZeroPadding2D, Flatten, Dropout
+from tensorflow.keras.layers import Input, Dense, Conv2D, MaxPool2D, ZeroPadding2D, Flatten, Dropout, UpSampling2D
 from tensorflow import keras
 import tensorflow as tf
 import numpy as np
@@ -214,40 +214,55 @@ class HASL():
         Creates the encoder used for states
         """
 
-        # State encoder layer ops
-        with tf.variable_scope('encoder'):
+        with tf.variable_scope('auto_encoder'):
+            # State encoder layer ops
             self.enc_layers = [
-                Conv2D(32, 3, strides=(2, 2), activation='relu'),
-                Conv2D(32, 3, strides=(2, 2), activation='relu'),
-                Conv2D(64, 3, strides=(2, 2), activation='relu'),
-                Conv2D(64, 3, strides=(2, 2), activation='relu'),
-                Conv2D(128, 3, strides=(2, 2), activation='relu'),
-                Flatten()
+                Conv2D(16, 3, activation='relu', padding='same'),
+                MaxPool2D(2),
+                Dropout(rate=0.4),
+                Conv2D(32, 3, activation='relu', padding='same'),
+                MaxPool2D(2),
+                Conv2D(64, 3, activation='relu', padding='same'),
+                MaxPool2D(2),
+                Dropout(rate=0.4),
+                Conv2D(64, 3, activation='relu', padding='same'),
+                MaxPool2D(2)
+            ]
+
+            self.dec_layers = [
+                Conv2D(128, 3, activation='relu', padding='same'),
+                UpSampling2D(2),
+                Dropout(rate=0.4),
+                Conv2D(64, 3, activation='relu', padding='same'),
+                UpSampling2D(2),
+                Conv2D(32, 3, activation='relu', padding='same'),
+                UpSampling2D(2),
+                Dropout(rate=0.4),
+                Conv2D(32, 3, activation='relu', padding='same'),
+                UpSampling2D(2),
+                Conv2D(1, 3, activation='relu', padding='same')
             ]
 
             # State encoder output ops
             self.enc_state = self.enc_layers[0](self.state_ph)
             for i in range(1, len(self.enc_layers)):
                 self.enc_state = self.enc_layers[i](self.enc_state)
+        
+            self.enc_vector = Flatten()(self.enc_state) # Used encoded representation op
 
-            self.enc_state_p = self.enc_layers[0](self.state_p_ph)
-            for i in range(1, len(self.enc_layers)):
-                self.enc_state_p = self.enc_layers[i](self.enc_state_p)
+            self.dec_state = self.enc_state
+            for i in range(1, len(self.dec_layers)):
+                self.dec_state = self.dec_layers[i](self.dec_state)
 
-            self.enc_dim = self.enc_state.shape[-1] # Encoded Feature Dimension
+            self.enc_dim = self.enc_vector.shape[-1] # Encoded Feature Dimension
             print('Encoder output dimensions:', self.enc_dim)
 
-            # Inverse Dynamics Model
-            self.state_state_pair = tf.concat([self.enc_state, self.enc_state_p], axis=1)
-            self.im_dense = Dense(256, activation='relu')(self.state_state_pair)
-            self.act_pred = Dense(n_base_acts, activation='softmax', use_bias=False)(self.im_dense)
-
             # State encoder train ops
-            self.act_actual_oh = tf.one_hot(self.act_ph, n_base_acts)
-            self.loss_i = tf.reduce_mean(tf.keras.losses.categorical_crossentropy(self.act_actual_oh, self.act_pred))
+            self.auto_enc_loss = tf.reduce_mean(tf.keras.losses.mean_squared_error(self.state_ph, self.dec_state))
 
-        self.im_train_vars = tf.trainable_variables(scope='encoder')
-        self.update_im = self.enc_optimizer.minimize(self.loss_i, var_list=self.im_train_vars)
+        self.auto_enc_train_vars = tf.trainable_variables(scope='auto_encoder')
+        print(self.auto_enc_train_vars)
+        self.update_auto_enc = self.enc_optimizer.minimize(self.auto_enc_loss, var_list=self.auto_enc_train_vars)
 
     def apply_encoder(self, state):
         if type(state) is not np.ndarray:
@@ -259,37 +274,21 @@ class HASL():
 
         return self.sess.run(self.enc_state, feed_dict={self.state_ph: state})
 
-    def train_encoder(self, states, state_ps, actions, batch_size=64):
+    def train_encoder(self, states, batch_size=64):
         formatted_states = np.stack(states)
-        formatted_state_ps = np.stack(state_ps)
-
-        # print(formatted_states.shape)
-        # print(formatted_state_ps.shape)
-        # print(len(actions))
-        # print(actions.shape)
-        # for i in range(3):
-        #     print(False not in (formatted_states[:, :, :, i] == formatted_state_ps[:, :, :, i+1]).reshape(-1))
-        # print(actions[:100])
+        if len(formatted_states.shape) == 3:
+            formatted_states = formatted_states[..., np.newaxis]
 
         correct = 0
-        for batch_idx in range(int(np.ceil(len(actions) / batch_size))):
+        for batch_idx in range(int(np.ceil(len(formatted_states) / batch_size))):
             start_idx = batch_idx * batch_size
             end_idx = (batch_idx + 1) * batch_size
-            act_preds, _ = self.sess.run([self.act_pred, self.update_im], 
-                        feed_dict={ 
-                            self.state_ph: formatted_states[start_idx:end_idx],
-                            self.state_p_ph: formatted_state_ps[start_idx:end_idx],
-                            self.act_ph: actions[start_idx:end_idx]
-                        })
-            # print(act_preds[:20])
-            act_preds = np.argmax(act_preds, axis=1)
-            correct += sum([1 if x[0] == x[1] else 0 for x in zip(act_preds, actions[start_idx:end_idx])])
-            # print(list(zip(act_preds[:100], actions[:100])))
-            print(np.unique(act_preds))
+            d, loss, _ = self.sess.run([self.dec_state, self.auto_enc_loss, self.update_auto_enc], 
+                    feed_dict={ 
+                        self.state_ph: formatted_states[start_idx:end_idx]
+                    })
 
-        accuracy = correct / len(actions)
-
-        return accuracy
+        return loss
 
     def sync_weights(self):
         if self.rank == self.controller:
@@ -299,3 +298,8 @@ class HASL():
             t_vars = tf.trainable_variables()
             for pair in zip(t_vars, sync_vars):
                 self.sess.run(tf.assign(pair[0], pair[1]))
+
+
+
+import cv2
+i = 0
