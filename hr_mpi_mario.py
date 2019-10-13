@@ -16,7 +16,7 @@ from nes_py.wrappers import BinarySpaceToDiscreteSpaceEnv
 import gym_super_mario_bros
 from gym_super_mario_bros.actions import COMPLEX_MOVEMENT
 
-OBS_DIM = 42
+OBS_DIM = 84
 OBS_DEPTH = 4
 
 class ObsStack():
@@ -40,6 +40,9 @@ class ObsStack():
         self.fill_first = True
 
     def push(self, obs):
+        """
+        Pushes a new state onto the stack at index 0.
+        """
         assert obs.shape == self.expected_shape
         assert type(obs) == list or type(obs) == np.ndarray
 
@@ -190,7 +193,7 @@ if __name__ == '__main__':
 
     ### Define starting parameters ###
     n_epochs = 1000
-    n_train_batches = 8
+    n_train_batches = 4
     n_process_batches = int(n_train_batches / n_processes)
     top_x = 5
     act_top_x = 2
@@ -219,7 +222,7 @@ if __name__ == '__main__':
         # use_device = tf.device(f'/cpu:{rank % n_cpus}')
 
     # with use_device:
-    hasl = HASL(comm, controller, rank, state_depth=OBS_DEPTH, sess_config=device_config)
+    hasl = HASL(comm, controller, rank, state_shape=(OBS_DIM, OBS_DIM), state_depth=OBS_DEPTH, sess_config=device_config)
 
     for epoch in range(1, n_epochs+1):
         if epoch > rand_explore_epochs:
@@ -260,6 +263,13 @@ if __name__ == '__main__':
             train_states = encoder_data[:, 0]
             train_actions = encoder_data[:, 1]
             train_state_ps = encoder_data[:, 3]
+
+            import matplotlib.pyplot as plt
+
+            # for i in range(3, -1, -1):
+            #     print(train_state_ps[100].shape)
+            #     plt.imshow(train_state_ps[100][:, :, i])
+            #     plt.show()
 
             accuracy = hasl.train_encoder(
                 train_states, train_state_ps, train_actions)

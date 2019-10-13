@@ -30,6 +30,7 @@ class HASL():
         self.as_nets = []
         self.create_phs(state_shape=self.state_shape, state_depth=state_depth)
         self.optimizer = tf.train.AdamOptimizer(learning_rate=1e-3)
+        self.enc_optimizer = tf.train.AdamOptimizer(learning_rate=1e-3)
         self.create_encoder_ops(state_shape=state_shape, n_base_acts=self.n_base_acts)
         self.create_policy_ops(n_act_seqs=self.n_act_seqs)
         self.sess.run(tf.global_variables_initializer())
@@ -212,44 +213,41 @@ class HASL():
         """
         Creates the encoder used for states
         """
-        self.enc_dim = 128 # Encoded Feature Dimension
 
         # State encoder layer ops
         with tf.variable_scope('encoder'):
             self.enc_layers = [
-                ZeroPadding2D(),
                 Conv2D(32, 3, strides=(2, 2), activation='relu'),
-                ZeroPadding2D(),
-                Dropout(0.2),
                 Conv2D(32, 3, strides=(2, 2), activation='relu'),
-                ZeroPadding2D(),
-                Conv2D(32, 3, strides=(2, 2), activation='relu'),
-                Dropout(0.2),
-                Conv2D(32, 3, strides=(2, 2), activation='relu'),
+                Conv2D(64, 3, strides=(2, 2), activation='relu'),
+                Conv2D(64, 3, strides=(2, 2), activation='relu'),
+                Conv2D(128, 3, strides=(2, 2), activation='relu'),
                 Flatten()
             ]
 
-        # State encoder output ops
-        self.enc_state = self.enc_layers[0](self.state_ph)
-        for i in range(1, len(self.enc_layers)):
-            self.enc_state = self.enc_layers[i](self.enc_state)
+            # State encoder output ops
+            self.enc_state = self.enc_layers[0](self.state_ph)
+            for i in range(1, len(self.enc_layers)):
+                self.enc_state = self.enc_layers[i](self.enc_state)
 
-        self.enc_state_p = self.enc_layers[0](self.state_p_ph)
-        for i in range(1, len(self.enc_layers)):
-            self.enc_state_p = self.enc_layers[i](self.enc_state_p)
+            self.enc_state_p = self.enc_layers[0](self.state_p_ph)
+            for i in range(1, len(self.enc_layers)):
+                self.enc_state_p = self.enc_layers[i](self.enc_state_p)
 
-        # Inverse Dynamics Model
-        with tf.variable_scope('inverse_model'):
+            self.enc_dim = self.enc_state.shape[-1] # Encoded Feature Dimension
+            print('Encoder output dimensions:', self.enc_dim)
+
+            # Inverse Dynamics Model
             self.state_state_pair = tf.concat([self.enc_state, self.enc_state_p], axis=1)
             self.im_dense = Dense(256, activation='relu')(self.state_state_pair)
             self.act_pred = Dense(n_base_acts, activation='softmax', use_bias=False)(self.im_dense)
 
-        # State encoder train ops
-        self.act_actual_oh = tf.one_hot(self.act_ph, n_base_acts)
-        self.loss_i = tf.reduce_mean(tf.keras.losses.categorical_crossentropy(self.act_actual_oh, self.act_pred))
+            # State encoder train ops
+            self.act_actual_oh = tf.one_hot(self.act_ph, n_base_acts)
+            self.loss_i = tf.reduce_mean(tf.keras.losses.categorical_crossentropy(self.act_actual_oh, self.act_pred))
 
-        self.im_train_vars = tf.trainable_variables(scope='encoder') + tf.trainable_variables(scope='inverse_model')
-        self.update_im = self.optimizer.minimize(self.loss_i, var_list=self.im_train_vars)
+        self.im_train_vars = tf.trainable_variables(scope='encoder')
+        self.update_im = self.enc_optimizer.minimize(self.loss_i, var_list=self.im_train_vars)
 
     def apply_encoder(self, state):
         if type(state) is not np.ndarray:
@@ -261,9 +259,17 @@ class HASL():
 
         return self.sess.run(self.enc_state, feed_dict={self.state_ph: state})
 
-    def train_encoder(self, states, state_ps, actions, batch_size=1024):
+    def train_encoder(self, states, state_ps, actions, batch_size=64):
         formatted_states = np.stack(states)
         formatted_state_ps = np.stack(state_ps)
+
+        # print(formatted_states.shape)
+        # print(formatted_state_ps.shape)
+        # print(len(actions))
+        # print(actions.shape)
+        # for i in range(3):
+        #     print(False not in (formatted_states[:, :, :, i] == formatted_state_ps[:, :, :, i+1]).reshape(-1))
+        # print(actions[:100])
 
         correct = 0
         for batch_idx in range(int(np.ceil(len(actions) / batch_size))):
@@ -275,8 +281,11 @@ class HASL():
                             self.state_p_ph: formatted_state_ps[start_idx:end_idx],
                             self.act_ph: actions[start_idx:end_idx]
                         })
+            # print(act_preds[:20])
             act_preds = np.argmax(act_preds, axis=1)
             correct += sum([1 if x[0] == x[1] else 0 for x in zip(act_preds, actions[start_idx:end_idx])])
+            # print(list(zip(act_preds[:100], actions[:100])))
+            print(np.unique(act_preds))
 
         accuracy = correct / len(actions)
 
