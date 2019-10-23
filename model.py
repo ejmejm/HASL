@@ -34,6 +34,7 @@ class HASL():
         self.create_encoder_ops(state_shape=state_shape, n_base_acts=self.n_base_acts)
         self.create_policy_ops(n_act_seqs=self.n_act_seqs)
         self.sess.run(tf.global_variables_initializer())
+        self.encoder_saver = None
         self.sync_weights()
 
     def create_as_net(self, obs, acts, n_acts=3, batch_size=32, n_epochs=200, test_frac=0.15):
@@ -213,6 +214,8 @@ class HASL():
         """
         Creates the encoder used for states
         """
+        for size in state_shape:
+            assert size % 2**4 == 0, 'state shape must be divisible by 2^4!' 
 
         with tf.variable_scope('auto_encoder'):
             # State encoder layer ops
@@ -240,7 +243,7 @@ class HASL():
                 Dropout(rate=0.4),
                 Conv2D(32, 3, activation='relu', padding='same'),
                 UpSampling2D(2),
-                Conv2D(1, 3, activation='relu', padding='same')
+                Conv2D(self.state_depth, 3, activation='relu', padding='same')
             ]
 
             # State encoder output ops
@@ -261,7 +264,6 @@ class HASL():
             self.auto_enc_loss = tf.reduce_mean(tf.keras.losses.mean_squared_error(self.state_ph, self.dec_state))
 
         self.auto_enc_train_vars = tf.trainable_variables(scope='auto_encoder')
-        print(self.auto_enc_train_vars)
         self.update_auto_enc = self.enc_optimizer.minimize(self.auto_enc_loss, var_list=self.auto_enc_train_vars)
 
     def apply_encoder(self, state):
@@ -274,21 +276,44 @@ class HASL():
 
         return self.sess.run(self.enc_state, feed_dict={self.state_ph: state})
 
-    def train_encoder(self, states, batch_size=64):
+    def train_encoder(self, states, batch_size=64, save_path=None):
         formatted_states = np.stack(states)
-        if len(formatted_states.shape) == 3:
-            formatted_states = formatted_states[..., np.newaxis]
 
         correct = 0
+        losses = 0
         for batch_idx in range(int(np.ceil(len(formatted_states) / batch_size))):
             start_idx = batch_idx * batch_size
             end_idx = (batch_idx + 1) * batch_size
-            d, loss, _ = self.sess.run([self.dec_state, self.auto_enc_loss, self.update_auto_enc], 
+            loss, _ = self.sess.run([self.auto_enc_loss, self.update_auto_enc], 
                     feed_dict={ 
                         self.state_ph: formatted_states[start_idx:end_idx]
                     })
+            
+            losses += loss
 
-        return loss
+        if save_path:
+            self.save_encoder(save_path)
+
+        return losses / (batch_idx + 1)
+
+    def save_encoder(self, path):
+        """
+        Creates a saver for the encoder if one does not exist, and then uses it to save the encoder variables.
+        """
+        if self.encoder_saver is None:
+            self.saver = tf.train.Saver(tf.trainable_variables(scope='auto_encoder'))
+
+        self.saver.save(self.sess, path)
+        print('Saved encoder model to {}'.format(path))
+
+    def load_encoder(self, path):
+        """
+        Loads the encoder from the specified model file path.
+        """
+        if self.encoder_saver is None:
+            self.saver = tf.train.Saver(tf.trainable_variables(scope='auto_encoder'))
+
+        self.saver.restore(self.sess, path)
 
     def sync_weights(self):
         if self.rank == self.controller:
@@ -298,8 +323,3 @@ class HASL():
             t_vars = tf.trainable_variables()
             for pair in zip(t_vars, sync_vars):
                 self.sess.run(tf.assign(pair[0], pair[1]))
-
-
-
-import cv2
-i = 0
