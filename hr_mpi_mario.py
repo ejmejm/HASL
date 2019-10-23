@@ -119,7 +119,7 @@ def worker(action_sets, hasl, max_steps=1000, act_epsilon=0.1, obs_stack_size=4)
     obs = filter_obs(obs)
     h_obs_stack = ObsStack(obs.shape, obs_stack_size) # High-level obs stack
     h_obs_stack.push(obs)
-    enc_full_obs = hasl.apply_encoder([h_obs_stack.get_stack()])[0]
+    enc_full_obs = hasl.apply_encoder([h_obs_stack.get_stack()])
 
     l_obs_stack = ObsStack(obs.shape, obs_stack_size) # Low-level obs stack
     l_obs_stack.push(obs)
@@ -149,7 +149,7 @@ def worker(action_sets, hasl, max_steps=1000, act_epsilon=0.1, obs_stack_size=4)
         ep_reward += step_reward
 
         h_obs_stack.push(obs_p)
-        enc_full_obs = hasl.apply_encoder([h_obs_stack.get_stack()])[0]
+        enc_full_obs = hasl.apply_encoder([h_obs_stack.get_stack()])
         train_data[-1].extend([act_set, step_reward, enc_full_obs])
 
         if d or step >= max_steps:
@@ -193,7 +193,7 @@ if __name__ == '__main__':
 
     ### Define starting parameters ###
     n_epochs = 1000
-    n_train_batches = 2 # 4
+    n_train_batches = 4
     n_process_batches = int(n_train_batches / n_processes)
     top_x = 5
     act_top_x = 2
@@ -228,13 +228,15 @@ if __name__ == '__main__':
     if rank == controller:
         if os.path.exists(encoder_save_path + '.index') and os.path.isfile(encoder_save_path + '.index'):
             hasl.load_encoder(encoder_save_path)
-            # train_encoder_epochs = 0
+            train_encoder_epochs = 0
             print('Loaded HASL autoencoder model!')
 
     hasl.sync_weights()
 
     for epoch in range(1, n_epochs+1):
-        if epoch > train_encoder_epochs:
+        if epoch == train_encoder_epochs + 1:
+            if rank == controller:
+                print('Starting policy training!')
             act_epsilon = target_act_epsilon
 
         train_data = []
@@ -284,72 +286,71 @@ if __name__ == '__main__':
                 loss = hasl.train_encoder(train_states, batch_size=128, save_path=encoder_save_path)
                 print(f'Auto encoder loss: {loss}')
             else:
-                'a'
                 # TODO: Change the way the actions are passed in to train the policy
-            #     hasl.train_policy(
-            #         cat_train_data[:, 0], cat_train_data[:, 1], cat_train_data[:, 2])
+                hasl.train_vanilla_policy(
+                    cat_train_data[:, 0], cat_train_data[:, 1], cat_train_data[:, 2])
 
-            #     ### Pull rewards and action sequences from the training data ###
+                ### Pull rewards and action sequences from the training data ###
 
-            #     print(
-            #         f'Avg Reward: {np.mean(all_rewards)}, Min: {np.min(all_rewards)}, Max: {np.max(all_rewards)}, Std: {np.std(all_rewards)}')
+                print(
+                    f'Avg Reward: {np.mean(all_rewards)}, Min: {np.min(all_rewards)}, Max: {np.max(all_rewards)}, Std: {np.std(all_rewards)}')
 
-            #     ### Calculate state differences ###
+                # ### Calculate state differences ###
 
-            #     state_changes = []
-            #     start_states = []
-            #     act_seqs = []
-            #     reward_list = []
-            #     # ss = []
-            #     seq_len = 3
-            #     for ep in range(len(train_data)):
-            #         real_step = 0
-            #         for step in range(seq_len, len(train_data[ep])):
-            #             real_step += len(train_data[ep][step][1])
-            #             # ss.append([real_step, train_data[ep][step][0]])
-            #             # state_changes.append([real_step, train_data[ep][step][0] - train_data[ep][step-seq_len][0]])
-            #             state_changes.append(
-            #                 train_data[ep][step][0] - train_data[ep][step-seq_len][0])
-            #             start_states.append(train_data[ep][step-seq_len][0])
-            #             act_seqs.append(train_data[ep][step-seq_len:step, 1])
-            #             reward_list.append(
-            #                 sum(train_data[ep][step-seq_len:step, 2]))
+                # state_changes = []
+                # start_states = []
+                # act_seqs = []
+                # reward_list = []
+                # # ss = []
+                # seq_len = 3
+                # for ep in range(len(train_data)):
+                #     real_step = 0
+                #     for step in range(seq_len, len(train_data[ep])):
+                #         real_step += len(train_data[ep][step][1])
+                #         # ss.append([real_step, train_data[ep][step][0]])
+                #         # state_changes.append([real_step, train_data[ep][step][0] - train_data[ep][step-seq_len][0]])
+                #         state_changes.append(
+                #             train_data[ep][step][0] - train_data[ep][step-seq_len][0])
+                #         start_states.append(train_data[ep][step-seq_len][0])
+                #         act_seqs.append(train_data[ep][step-seq_len:step, 1])
+                #         reward_list.append(
+                #             sum(train_data[ep][step-seq_len:step, 2]))
 
-            #     state_changes = np.asarray(state_changes).squeeze()
-            #     start_states = np.asarray(start_states).squeeze()
-            #     act_seqs = np.asarray(act_seqs)
+                # state_changes = np.asarray(state_changes).squeeze()
+                # start_states = np.asarray(start_states).squeeze()
+                # act_seqs = np.asarray(act_seqs)
 
-            #     ### Use softmax on rewards to stochastically choose which episodes to pull actions from ###
+                # ### Use softmax on rewards to stochastically choose which episodes to pull actions from ###
 
-            #     zero_dist = -min(reward_list)
-            #     scaled_rewards = [r + zero_dist for r in reward_list]
-            #     total_reward = sum(scaled_rewards)
-            #     scaled_rewards = [r / total_reward for r in scaled_rewards]
+                # zero_dist = -min(reward_list)
+                # scaled_rewards = [r + zero_dist for r in reward_list]
+                # total_reward = sum(scaled_rewards)
+                # scaled_rewards = [r / total_reward for r in scaled_rewards]
 
-            #     top_ids = np.random.choice(
-            #         range(len(scaled_rewards)), size=top_x, replace=False, p=scaled_rewards)
-            #     top_samples = [state_changes[i] for i in top_ids]
+                # top_ids = np.random.choice(
+                #     range(len(scaled_rewards)), size=top_x, replace=False, p=scaled_rewards)
+                # top_samples = [state_changes[i] for i in top_ids]
 
-            #     ### Gather and format data for action sequence proposals ###
+                # ### Gather and format data for action sequence proposals ###
 
-            #     as_net_train_data = find_neighbors(
-            #         top_samples, state_changes, n=n_as_train_samples)
+                # as_net_train_data = find_neighbors(
+                #     top_samples, state_changes, n=n_as_train_samples)
 
-            #     obs = np.array([start_states[x] for x in as_net_train_data[0]])
-            #     acts = np.array([np.hstack(act_seqs[x])
-            #                     for x in as_net_train_data[0]])
+                # obs = np.array([start_states[x] for x in as_net_train_data[0]])
+                # acts = np.array([np.hstack(act_seqs[x])
+                #                 for x in as_net_train_data[0]])
 
-            #     # TODO: Make an initial period where this doesn't happen for x epochs
-            #     # so that the autoencoder has time to learn more stabely
-            #     if epoch % 10 == 0:
-            #         hasl.create_as_net(obs, acts)
+                # # TODO: Make an initial period where this doesn't happen for x epochs
+                # # so that the autoencoder has time to learn more stabely
+                # if epoch % 10 == 0:
+                #     hasl.create_as_net(obs, acts)
 
-            #     # print(f'Count: {len(state_changes)}')
-            #     # with open('state_changes.pickle', 'wb') as f:
-            #     #     pickle.dump(state_changes, f)
+                # # print(f'Count: {len(state_changes)}')
+                # # with open('state_changes.pickle', 'wb') as f:
+                # #     pickle.dump(state_changes, f)
 
-            #     # with open('ss.pickle', 'wb') as f:
-            #     #     pickle.dump(ss, f)
+                # # with open('ss.pickle', 'wb') as f:
+                # #     pickle.dump(ss, f)
 
             ### Send the new action sequences to each process and sync models ###
             comm.bcast(train_act_sets, controller)

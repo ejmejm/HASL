@@ -97,9 +97,9 @@ class HASL():
         with tf.variable_scope('policy'):
             # Creating a conv net for the policy and value estimator
             self.obs_op = Input(shape=(self.enc_dim,))
-            dense1 = Dense(128, activation='relu')(self.obs_op)
-            act_dense = Dense(128, activation='relu')(dense1)
-            val_dense = Dense(128, activation='relu')(dense1)
+            dense1 = Dense(256, activation='relu')(self.obs_op)
+            act_dense = Dense(256, activation='relu')(dense1)
+            val_dense = Dense(256, activation='relu')(dense1)
 
             # Output probability distribution over possible actions
             self.act_probs_op = Dense(n_act_seqs, activation='softmax', name='act_probs')(act_dense)
@@ -112,7 +112,7 @@ class HASL():
 
             self.act_masks = tf.one_hot(self.act_ph, n_act_seqs, dtype=tf.float32)
             self.log_probs = tf.log(self.act_probs_op)
-            self.resp_acts = tf.reduce_sum(self.act_masks *  self.log_probs, axis=1)
+            self.resp_acts = tf.reduce_sum(self.act_masks * self.log_probs, axis=1)
 
             self.advantages = self.rew_ph - tf.squeeze(self.value_op)
 
@@ -183,8 +183,11 @@ class HASL():
             return self.sess.run(self.act_out, feed_dict={self.obs_op: obs})
 
     def train_policy(self, states, actions, rewards):
+        """
+        Trains the policy using PPO. Currently not functional.
+        """
         # TODO: Change the way the actions are selected when training the policy
-        actions = [a[0] for a in actions]
+        actions = [a[0] for a in actions] # Currently like this because actions are singular and of the shape (1,)
         states = np.vstack(states)
 
         self.old_probs, self.old_advantages = self.sess.run([self.resp_acts, self.advantages], 
@@ -209,6 +212,29 @@ class HASL():
         #     feed_dict={self.obs_op: states,
         #         self.act_ph: actions,
         #         self.rew_ph: rewards})
+    
+    def train_vanilla_policy(self, states, actions, rewards):
+        """
+        Trains the policy using vanilla policy gradient.
+        """
+        # TODO: Change the way the actions are selected when training the policy
+        actions = [a[0] for a in actions] # Currently like this because actions are singular and of the shape (1,)
+        states = np.vstack(states)
+
+        loss = tf.reduce_sum(self.act_masks * self.log_probs, axis=1) * self.advantages
+        loss = -tf.reduce_mean(loss)
+
+        actor_update = self.optimizer.minimize(loss)
+
+        with tf.control_dependencies([actor_update]):
+            value_loss = tf.reduce_mean(tf.square(self.rew_ph - tf.squeeze(self.value_op)))
+            value_update = self.optimizer.minimize(value_loss)
+
+        self.sess.run([actor_update, value_update], 
+            feed_dict={self.obs_op: states,
+                    self.act_ph: actions,
+                    self.rew_ph: rewards})
+        
 
     def create_encoder_ops(self, state_shape=(42, 42), n_base_acts=12):
         """
