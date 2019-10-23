@@ -287,7 +287,7 @@ if __name__ == '__main__':
                 print(f'Auto encoder loss: {loss}')
             else:
                 # TODO: Change the way the actions are passed in to train the policy
-                hasl.train_vanilla_policy(
+                hasl.train_policy(
                     cat_train_data[:, 0], cat_train_data[:, 1], cat_train_data[:, 2])
 
                 ### Pull rewards and action sequences from the training data ###

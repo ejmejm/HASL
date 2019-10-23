@@ -112,7 +112,7 @@ class HASL():
 
             self.act_masks = tf.one_hot(self.act_ph, n_act_seqs, dtype=tf.float32)
             self.log_probs = tf.log(self.act_probs_op)
-            self.resp_acts = tf.reduce_sum(self.act_masks * self.log_probs, axis=1)
+            self.resp_acts = tf.reduce_sum(self.act_masks * self.act_probs_op, axis=1)
 
             self.advantages = self.rew_ph - tf.squeeze(self.value_op)
 
@@ -204,14 +204,8 @@ class HASL():
                                        self.advatange_ph: self.old_advantages})
             if kl_div > 1.5 * self.target_kl:
                 break
-        print(i)
-
-
-
-        # self.sess.run([self.policy_update, self.value_update],
-        #     feed_dict={self.obs_op: states,
-        #         self.act_ph: actions,
-        #         self.rew_ph: rewards})
+    
+        print('# PPO updates: {}'.format(i+1))
     
     def train_vanilla_policy(self, states, actions, rewards):
         """
