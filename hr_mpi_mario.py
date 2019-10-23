@@ -142,14 +142,13 @@ def worker(action_sets, hasl, max_steps=1000, act_epsilon=0.1, obs_stack_size=4)
             obs_p = filter_obs(obs_p)
             l_obs_stack.push(obs_p)
             full_data[-1].extend([act, r, l_obs_stack.get_stack()])
-            obs = obs_p
             step_reward += r
             step += 1
             if d or step >= max_steps:
                 break
         ep_reward += step_reward
 
-        h_obs_stack.push(obs)
+        h_obs_stack.push(obs_p)
         enc_full_obs = hasl.apply_encoder([h_obs_stack.get_stack()])[0]
         train_data[-1].extend([act_set, step_reward, enc_full_obs])
 
@@ -257,6 +256,14 @@ if __name__ == '__main__':
         if rank == controller:
             encoder_data = np.concatenate(encoder_data)
             cat_train_data = np.concatenate(train_data)
+
+            # print(encoder_data[0][0].shape)
+
+            # print(cat_train_data.shape)
+            # print(cat_train_data[0][0].shape)
+            # print(cat_train_data[0][1])
+            # print(cat_train_data[0][2])
+            # print(cat_train_data[0][3].shape)
 
         ###### End of data gathering, start of training ######
 

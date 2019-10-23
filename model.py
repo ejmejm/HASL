@@ -272,9 +272,9 @@ class HASL():
 
         if state.shape == 2:
             state = [state]
-            return self.sess.run(self.enc_state, feed_dict={self.state_ph: state})[0]
+            return self.sess.run(self.enc_vector, feed_dict={self.state_ph: state})
 
-        return self.sess.run(self.enc_state, feed_dict={self.state_ph: state})
+        return self.sess.run(self.enc_vector, feed_dict={self.state_ph: state})
 
     def train_encoder(self, states, batch_size=64, save_path=None):
         formatted_states = np.stack(states)
