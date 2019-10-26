@@ -200,7 +200,10 @@ if __name__ == '__main__':
     min_branch, max_branch = 2, 3
     log_freq = 60
     n_as_proposals = 5
+    as_proposal_delay = 10 # How many epochs in between new ASNs being added
     n_as_train_samples = 512
+    act_branch_factor = 3 # How many actions each model should output
+                          # TODO: Change models to LSTMs and make this variable
     train_encoder_epochs = 2
     act_epsilon = 1
     target_act_epsilon = 0.1
@@ -290,11 +293,11 @@ if __name__ == '__main__':
                 ### Calculate state differences ###
 
                 state_changes = []
-                start_states = []
+                all_states = []
                 act_seqs = []
                 reward_list = []
                 # ss = []
-                seq_len = 3
+                seq_len = act_branch_factor
                 for ep in range(len(train_data)):
                     real_step = 0
                     for step in range(seq_len, len(train_data[ep])):
@@ -303,13 +306,13 @@ if __name__ == '__main__':
                         # state_changes.append([real_step, train_data[ep][step][0] - train_data[ep][step-seq_len][0]])
                         state_changes.append(
                             train_data[ep][step][0] - train_data[ep][step-seq_len][0])
-                        start_states.append(train_data[ep][step-seq_len][0])
+                        all_states.append(train_data[ep][step-seq_len:step, 0])
                         act_seqs.append(train_data[ep][step-seq_len:step, 1])
                         reward_list.append(
                             sum(train_data[ep][step-seq_len:step, 2]))
 
                 state_changes = np.asarray(state_changes).squeeze()
-                start_states = np.asarray(start_states).squeeze()
+                all_states = np.asarray(all_states).squeeze()
                 act_seqs = np.asarray(act_seqs)
 
                 ### Use scaled on rewards to stochastically choose which episodes to pull actions from ###
@@ -322,23 +325,36 @@ if __name__ == '__main__':
 
                 top_ids = np.random.choice(
                     range(len(scaled_rewards)), size=top_x, replace=False, p=scaled_rewards)
-                top_samples = [state_changes[i] for i in top_ids]
+                top_samples = [state_changes[i] for i in top_ids] # List of the central samples
 
                 ### Gather and format data for action sequence proposals ###
 
+                # Get a list with an entry for each top_sample
+                # Each list contains n indices of the other closest samples
                 as_net_train_data = find_neighbors(
-                    top_samples, state_changes, n=n_as_train_samples)
+                    top_samples, state_changes, n=2)
+                
+                ### Formatting training data for new act set models ###
 
-                print(as_net_train_data[0])
-                # This needs to be changed such that more than just the one as net gets created
-                obs = np.array([start_states[x] for x in as_net_train_data[0]])
-                acts = np.array([np.hstack(act_seqs[x])
-                                for x in as_net_train_data[0]])
+                obs = []
+                acts = []
+                for cluster in as_net_train_data:
+                    obs.append([])
+                    acts.append([])
+                    for idx in cluster:
+                        obs[-1].append(np.vstack(all_states[idx]))
+                        acts[-1].append(np.hstack(act_seqs[idx]))
+
+                obs = np.asarray(obs)
+                acts = np.asarray(acts)
+
+                print(obs.shape, acts.shape)
+                print(obs[0, 0])
 
                 # TODO: Make an initial period where this doesn't happen for x epochs
                 # so that the autoencoder has time to learn more stabely
-                if epoch % 10 == 0:
-                    hasl.create_as_net(obs, acts)
+                if epoch % as_proposal_delay == 0:
+                    hasl.create_as_net(obs[0], acts[0], n_acts=act_branch_factor)
 
                 # print(f'Count: {len(state_changes)}')
                 # with open('state_changes.pickle', 'wb') as f:

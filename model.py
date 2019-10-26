@@ -14,19 +14,20 @@ class HASL():
             self.sess = tf.Session(config=sess_config)
 
         self.comm = comm
-        self.controller = controller
+        self.controller = controller # Index of the master process
         self.rank = rank
         self.sess_config = sess_config
-        self.state_shape = state_shape
-        self.state_depth = state_depth
-        self.n_base_acts = n_base_acts
-        self.n_act_seqs = n_act_seqs
-        self.clip_val = ppo_clip_val
-        self.val_coef = ppo_val_coef
-        self.entropy_coef = ppo_entropy_coef
-        self.ppo_iters = ppo_iters
-        self.target_kl = ppo_kl_limit
-        self.n_curr_acts = n_act_seqs # Equal to n_act_seqs until the set_act_seqs has been called to update it
+        self.state_shape = state_shape       # Base state shape, minus the depth (should be 2D) 
+        self.state_depth = state_depth       # Depth / 3rd dimension of the input states (i.e. 3 for RGB images)
+        self.n_base_acts = n_base_acts       # Number of micro actions available (constant throughout)
+        self.n_act_seqs = n_act_seqs         # Number of micro + macro actions currently avaliable and being created
+        self.clip_val = ppo_clip_val         # Clip value PPO parameter
+        self.val_coef = ppo_val_coef         # How much to weigh value optimization in the PPO update op
+        self.entropy_coef = ppo_entropy_coef # How much to weigh entropy in the PPO update op
+        self.ppo_iters = ppo_iters           # Number of PPO loops per training batch
+        self.target_kl = ppo_kl_limit        # Max KL-divergence before the PPO loop haults
+        self.n_curr_acts = n_act_seqs        # Equal to n_act_seqs until the set_act_seqs has been called to update it
+                                             # Actual number of micro + macro actions currently available (curr # output nodes)
         self.as_nets = []
         self.create_phs(state_shape=self.state_shape, state_depth=state_depth)
         self.optimizer = tf.train.AdamOptimizer(learning_rate=1e-3)
@@ -37,14 +38,23 @@ class HASL():
         self.encoder_saver = None
         self.sync_weights()
 
-    def create_as_net(self, obs, acts, n_acts=3, batch_size=32, n_epochs=200, test_frac=0.15):
+    def create_as_net(self, obs, acts, n_acts=3, batch_size=32, n_epochs=50, test_frac=0.15, hidden_dims=(128,64,)):
         scope_name = f'as_net_{self.n_act_seqs}'
 
         with tf.variable_scope(scope_name):
             act_seq_ph = tf.placeholder(dtype=tf.int32, shape=(None, n_acts))
             flat_act_seqs = tf.reshape(act_seq_ph, (-1,))
 
-            dense = Dense(128, activation='relu')(self.obs_op)
+            dense = Dense(hidden_dims[0], activation='relu')(self.obs_op)
+            
+            ###############################
+
+            dense2 = Dense(hidden_dims[1], activation='relu')(dense)
+            act_probs.append(Dense(self.n_curr_acts, activation=None)(dense2))
+
+
+            ###############################
+
             act_probs = []
             act_ohs = []
             losses = []
@@ -52,9 +62,9 @@ class HASL():
                 act_indices = tf.range(i, tf.shape(flat_act_seqs)[0], n_acts)
                 resp_acts = tf.gather(flat_act_seqs, act_indices)
                 act_ohs.append(tf.one_hot(resp_acts, self.n_curr_acts, dtype=tf.float32))
-                dense2 = Dense(64, activation='relu')(dense)
+                dense2 = Dense(hidden_dims[1], activation='relu')(dense)
                 act_probs.append(Dense(self.n_curr_acts, activation=None)(dense2))
-                losses.append(tf.losses.softmax_cross_entropy(act_ohs[-1], act_probs[-1]))
+                losses.append(tf.losses.softmax_cross_entropy(act_ohs[i], act_probs[-1]))
                 
             as_optimizer = tf.train.AdamOptimizer(learning_rate=1e-3)
             total_loss = tf.math.add_n(losses)
