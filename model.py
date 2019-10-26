@@ -42,7 +42,7 @@ class HASL():
         scope_name = f'as_net_{self.n_act_seqs}'
 
         with tf.variable_scope(scope_name):
-            act_seq_ph = tf.placeholder(dtype=tf.int32, shape=(None, n_acts))
+            act_seq_ph = tf.placeholder(dtype=tf.int32, shape=(None,))
             flat_act_seqs = tf.reshape(act_seq_ph, (-1,))
 
             dense = Dense(hidden_dims[0], activation='relu')(self.obs_op)
@@ -50,48 +50,65 @@ class HASL():
             ###############################
 
             dense2 = Dense(hidden_dims[1], activation='relu')(dense)
-            act_probs.append(Dense(self.n_curr_acts, activation=None)(dense2))
+            act_probs = Dense(self.n_curr_acts, activation=None)(dense2)
 
+            act_ohs = tf.one_hot(act_seq_ph, self.n_curr_acts, dtype=tf.float32)
+            
+            loss = tf.losses.softmax_cross_entropy(act_ohs, act_probs)
+            asn_optimizer = tf.train.AdamOptimizer(learning_rate=1e-3)
+            asn_update = asn_optimizer.minimize(loss)
 
             ###############################
 
-            act_probs = []
-            act_ohs = []
-            losses = []
-            for i in range(n_acts):
-                act_indices = tf.range(i, tf.shape(flat_act_seqs)[0], n_acts)
-                resp_acts = tf.gather(flat_act_seqs, act_indices)
-                act_ohs.append(tf.one_hot(resp_acts, self.n_curr_acts, dtype=tf.float32))
-                dense2 = Dense(hidden_dims[1], activation='relu')(dense)
-                act_probs.append(Dense(self.n_curr_acts, activation=None)(dense2))
-                losses.append(tf.losses.softmax_cross_entropy(act_ohs[i], act_probs[-1]))
+            # act_probs = []
+            # act_ohs = []
+            # losses = []
+            # for i in range(n_acts):
+            #     act_indices = tf.range(i, tf.shape(flat_act_seqs)[0], n_acts)
+            #     resp_acts = tf.gather(flat_act_seqs, act_indices)
+            #     act_ohs.append(tf.one_hot(resp_acts, self.n_curr_acts, dtype=tf.float32))
+            #     dense2 = Dense(hidden_dims[1], activation='relu')(dense)
+            #     act_probs.append(Dense(self.n_curr_acts, activation=None)(dense2))
+            #     losses.append(tf.losses.softmax_cross_entropy(act_ohs[i], act_probs[-1]))
                 
-            as_optimizer = tf.train.AdamOptimizer(learning_rate=1e-3)
-            total_loss = tf.math.add_n(losses)
-            as_update = as_optimizer.minimize(total_loss)
+            # as_optimizer = tf.train.AdamOptimizer(learning_rate=1e-3)
+            # total_loss = tf.math.add_n(losses)
+            # as_update = as_optimizer.minimize(total_loss)
 
         init_new_vars_ops = [x.initializer for x in tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES, scope=scope_name)]
         self.sess.run(init_new_vars_ops)
 
-        # train_obs, test_obs = obs[:]
+        train_obs, test_obs = obs[:-int(len(obs)*test_frac)], obs[-int(len(obs)*test_frac):]
+        train_acts, test_acts = acts[:-int(len(acts)*test_frac)], acts[-int(len(acts)*test_frac):]
 
         for epoch in range(n_epochs):
             correct_preds = 0
-            total_preds = 0
-            for idx in range(0, len(obs), batch_size):
-                aps, _ = self.sess.run([act_probs, as_update], 
+            for idx in range(0, len(train_obs), batch_size):
+                # Run and train ASN
+                aps, _ = self.sess.run([act_probs, asn_update], 
                     feed_dict={
-                        self.obs_op: obs[idx:idx+batch_size],
-                        act_seq_ph: acts[idx:idx+batch_size]
+                        self.obs_op: train_obs[idx:idx+batch_size],
+                        act_seq_ph: train_acts[idx:idx+batch_size]
                     })
 
-                for i, ap in enumerate(aps):
-                    ids = np.argmax(ap, axis=1)
-                    correct_preds += (ids == acts[idx:idx+batch_size,i]).sum()
-                    total_preds += batch_size
-                # tl += loss[0]
-            # print('Loss:', tl)
-            print(correct_preds/total_preds)
+                pred_acts = np.argmax(aps, axis=1)
+                correct_preds += (pred_acts == train_acts[idx:idx+batch_size]).sum()
+            
+            train_acc = correct_preds/len(train_obs)*100
+
+            # Re-run ASN for testing accuracy
+            aps = self.sess.run(act_probs, 
+                feed_dict={
+                    self.obs_op: test_obs,
+                    act_seq_ph: test_acts
+                })
+
+            pred_acts = np.argmax(aps, axis=1)
+            correct_preds = (pred_acts == test_acts).sum()
+            test_acc = correct_preds/len(test_obs)*100
+                
+            print('ASN Epoch {0} | Train acc: {1:.2f}% | Test acc {2:.2f}'.format(
+                epoch, train_acc, test_acc))
 
         # TODO: Add to list of act sequences
         self.n_act_seqs += 1
