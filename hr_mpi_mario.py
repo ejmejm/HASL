@@ -1,3 +1,4 @@
+import argparse
 import numpy as np
 import gc
 import gym
@@ -167,7 +168,6 @@ def worker(action_sets, hasl, max_steps=1000, act_epsilon=0.1, obs_stack_size=4)
 
     return train_data, full_data, rewards
 
-
 def find_neighbors(samples, all_data, n=500, return_idx=True):
     lshf = LSHForest(n_estimators=20, n_candidates=200,
                      n_neighbors=n).fit(all_data)
@@ -184,6 +184,34 @@ def find_neighbors(samples, all_data, n=500, return_idx=True):
 
     return np.asarray(neighbors)
 
+### List Arguments ###
+
+parser = argparse.ArgumentParser()
+
+parser.add_argument('-ne', '--n_epochs', dest='n_epochs', type=int,
+    default=1000, help='Number of overall training epochs')
+parser.add_argument('-ms', '--max_rollout_steps', dest='max_rollout_steps', type=int,
+    default=1000, help='Max number of steps in a single rollout')
+parser.add_argument('-nr', '--n_rollouts', dest='n_rollouts', type=int,
+    default=4, help='Number of rollouts per epoch.')
+parser.add_argument('-nar', '--n_asn_rollouts', dest='n_asn_rollouts', type=int,
+    default=32, help='Number of rollouts used for training an ASN')
+parser.add_argument('-nag', '--n_asn_gen', dest='n_asn_gen', type=int,
+    default=5, help='Number of ASNs created in one training cycle')
+parser.add_argument('-lf', '--log_freq', dest='log_freq', type=int,
+    default=10, help='Number of epochs between logging (currently unused)')
+parser.add_argument('-apd', '--asn_proposal_delay', dest='asn_proposal_delay', type=int,
+    default=8, help='Number of epochs in between ASN generation')
+parser.add_argument('-nas', '--n_asn_train_samples', dest='n_asn_train_samples', type=int,
+    default=512, help='Number of smaples drawn to train an individual ASN')
+parser.add_argument('-b', '--act_branch_factor', dest='act_branch_factor', type=int,
+    default=3, help='Number of actions each ASN should execute')
+parser.add_argument('-ee', '--train_encoder_epochs', dest='train_encoder_epochs', type=int,
+    default=10, help='Number of epochs to train the encoder before policy training begins')
+parser.add_argument('-ae', '--act_epsilon', dest='act_epsilon', type=float,
+    default=1., help='Initial chance of taking a random action')
+parser.add_argument('-tae', '--target_act_epsilon', dest='target_act_epsilon', type=float,
+ default=0.1, help='The final target probability of taking a random action')
 
 if __name__ == '__main__':
     ### Setp for MPI ###
@@ -193,24 +221,24 @@ if __name__ == '__main__':
     controller = 0
 
     ### Define starting parameters ###
-    n_epochs = 1000
-    max_rollout_steps = 1000
-    n_train_batches = 4
-    n_asn_train_batches = 32
+    args = parser.parse_args()
+
+    n_epochs = args.n_epochs
+    max_rollout_steps = args.max_rollout_steps
+    n_train_batches = args.n_rollouts
+    n_asn_train_batches = args.n_asn_rollouts
     n_process_batches = int(n_train_batches / n_processes)
     n_asn_process_batches = int(n_asn_train_batches / n_processes)
-    top_x = 5
-    act_top_x = 2
+    n_as_proposals = args.n_asn_gen
     # min_branch, max_branch = 2, 3
-    log_freq = 60
-    n_as_proposals = 5
-    asn_proposal_delay = 8 # How many epochs in between new ASNs being added
-    n_asn_train_samples = 512
-    act_branch_factor = 3 # How many actions each model should output
-                          # TODO: Change models to LSTMs and make this variable
-    train_encoder_epochs = 2
-    act_epsilon = 1
-    target_act_epsilon = 0.1
+    log_freq = args.log_freq
+    asn_proposal_delay = args.asn_proposal_delay # How many epochs in between new ASNs being added
+    n_asn_train_samples = args.n_asn_train_samples
+    act_branch_factor = args.act_branch_factor # How many actions each model should output
+                                               # TODO: Change models to LSTMs and make this variable
+    train_encoder_epochs = args.train_encoder_epochs
+    act_epsilon = args.act_epsilon
+    target_act_epsilon = args.target_act_epsilon
     train_act_sets = [[i] for i in range(0, 7)]
     encoder_save_path = 'models/encoder.h5'
 
@@ -333,7 +361,7 @@ if __name__ == '__main__':
                     scaled_rewards /= total_reward
 
                     top_ids = np.random.choice(
-                        range(len(scaled_rewards)), size=top_x, replace=False, p=scaled_rewards)
+                        range(len(scaled_rewards)), size=n_as_proposals, replace=False, p=scaled_rewards)
                     top_samples = [state_changes[i] for i in top_ids] # List of the central samples
 
                     ### Gather and format data for action sequence proposals ###
@@ -377,7 +405,6 @@ if __name__ == '__main__':
             ### Send the new action sequences to each process and sync models ###
             comm.bcast(train_act_sets, controller)
             hasl.sync_weights()
-            print('Collecting Garbage.')
         else:
             ### Incorporate the new action sequences into its list for further training and sync models ###
             train_act_sets = comm.bcast(None, controller)
