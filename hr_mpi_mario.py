@@ -370,6 +370,9 @@ if __name__ == '__main__':
                     # Each list contains n indices of the other closest samples
                     as_net_train_data = find_neighbors(
                         top_samples, state_changes, n=n_asn_train_samples)
+
+                    with open('sc.pickle', 'wb') as f:
+                        pickle.dump([state_changes, all_states, act_seqs, as_net_train_data], f)
                     
                     ### Formatting training data for new act set models ###
 
