@@ -133,8 +133,10 @@ def worker(action_sets, hasl, max_steps=1000, act_epsilon=0.1, obs_stack_size=4)
         # act_set = action_sets[act_idx]
 
         # TODO: The method for generating act_sets seems strange
-        act_set = [hasl.choose_action(
-            enc_full_obs, epsilon=act_epsilon, possible_acts=list(range(env.action_space.n)))]
+        act_set = [hasl.choose_action(enc_full_obs, epsilon=act_epsilon)]
+        if act_set[0] > 11:
+            print(f'AAA: {act_set[0]}')
+            act_set[0] = 0
 
         train_data.append([enc_full_obs])
         step_reward = 0
@@ -211,7 +213,7 @@ parser.add_argument('-ee', '--train_encoder_epochs', dest='train_encoder_epochs'
 parser.add_argument('-ae', '--act_epsilon', dest='act_epsilon', type=float,
     default=1., help='Initial chance of taking a random action')
 parser.add_argument('-tae', '--target_act_epsilon', dest='target_act_epsilon', type=float,
- default=0.1, help='The final target probability of taking a random action')
+    default=0.1, help='The final target probability of taking a random action')
 
 if __name__ == '__main__':
     ### Setp for MPI ###
@@ -371,8 +373,8 @@ if __name__ == '__main__':
                     as_net_train_data = find_neighbors(
                         top_samples, state_changes, n=n_asn_train_samples)
 
-                    with open('sc.pickle', 'wb') as f:
-                        pickle.dump([state_changes, all_states, act_seqs, as_net_train_data], f)
+                    # with open('sc.pickle', 'wb') as f:
+                    #     pickle.dump([state_changes, all_states, act_seqs, as_net_train_data], f)
                     
                     ### Formatting training data for new act set models ###
 
@@ -400,18 +402,23 @@ if __name__ == '__main__':
                         print('Training new ASN #{}'.format(i+1))
                         hasl.create_as_net(obs[i], acts[i], n_acts=act_branch_factor, n_epochs=10,
                             hidden_dims=(64,32,))
-                        print()
+                    hasl.set_act_seqs()
+                    hasl.sync_asns()
+                    
                 else:
                     hasl.train_policy(
                         cat_train_data[:, 0], cat_train_data[:, 1], cat_train_data[:, 2])
+                    hasl.sync_weights()
 
             ### Send the new action sequences to each process and sync models ###
             comm.bcast(train_act_sets, controller)
-            hasl.sync_weights()
         else:
+            if epoch % asn_proposal_delay == 0:
+                hasl.sync_asns()
+            else:
+                hasl.sync_weights()
             ### Incorporate the new action sequences into its list for further training and sync models ###
             train_act_sets = comm.bcast(None, controller)
-            hasl.sync_weights()
 
         gc.collect()
 

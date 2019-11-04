@@ -6,8 +6,8 @@ import numpy as np
 class HASL():
     def __init__(self, comm, controller, rank, sess_config=None, 
                  state_shape=(42, 42), state_depth=1, n_base_acts=12,
-                 n_act_seqs=12, ppo_clip_val=0.2, ppo_val_coef=1.,
-                 ppo_entropy_coef=0.01, ppo_iters=80, ppo_kl_limit=1.5):
+                 ppo_clip_val=0.2, ppo_val_coef=1., ppo_entropy_coef=0.01,
+                 ppo_iters=80, ppo_kl_limit=1.5):
         if sess_config is None:
             self.sess = tf.Session()
         else:
@@ -20,15 +20,16 @@ class HASL():
         self.state_shape = state_shape       # Base state shape, minus the depth (should be 2D) 
         self.state_depth = state_depth       # Depth / 3rd dimension of the input states (i.e. 3 for RGB images)
         self.n_base_acts = n_base_acts       # Number of micro actions available (constant throughout)
-        self.n_act_seqs = n_act_seqs         # Number of micro + macro actions currently avaliable and being created
+        self.n_act_seqs = n_base_acts        # Number of micro + macro actions currently avaliable and being created
         self.clip_val = ppo_clip_val         # Clip value PPO parameter
         self.val_coef = ppo_val_coef         # How much to weigh value optimization in the PPO update op
         self.entropy_coef = ppo_entropy_coef # How much to weigh entropy in the PPO update op
         self.ppo_iters = ppo_iters           # Number of PPO loops per training batch
         self.target_kl = ppo_kl_limit        # Max KL-divergence before the PPO loop haults
-        self.n_curr_acts = n_act_seqs        # Equal to n_act_seqs until the set_act_seqs has been called to update it
+        self.n_curr_acts = self.n_act_seqs   # Equal to n_act_seqs until the set_act_seqs has been called to update it
                                              # Actual number of micro + macro actions currently available (curr # output nodes)
-        self.as_nets = []
+        self.asns = []
+        self.asn_details = []
         self.create_phs(state_shape=self.state_shape, state_depth=state_depth)
         self.optimizer = tf.train.AdamOptimizer(learning_rate=1e-3)
         self.enc_optimizer = tf.train.AdamOptimizer(learning_rate=1e-3)
@@ -37,6 +38,41 @@ class HASL():
         self.sess.run(tf.global_variables_initializer())
         self.encoder_saver = None
         self.sync_weights()
+
+    def create_empty_as_net(self, hidden_dims=(128,64,)):
+        """
+        Used to create an untrained ASN for the purpose of syncing HASL
+        models over separate processes.
+        """
+        scope_name = f'as_net_{self.n_act_seqs}'
+
+        with tf.variable_scope(scope_name):
+            act_seq_ph = tf.placeholder(dtype=tf.int32, shape=(None,))
+            flat_act_seqs = tf.reshape(act_seq_ph, (-1,))
+
+            dense = Dense(hidden_dims[0], activation='relu')(self.obs_op)
+            
+            ###############################
+
+            dense2 = Dense(hidden_dims[1], activation='relu')(dense)
+            act_probs = Dense(self.n_curr_acts, activation=None)(dense2)
+            act_out = tf.squeeze(tf.random.multinomial(tf.log(act_probs), 1))
+
+            act_ohs = tf.one_hot(act_seq_ph, self.n_curr_acts, dtype=tf.float32)
+            
+            loss = tf.losses.softmax_cross_entropy(act_ohs, act_probs)
+            asn_optimizer = tf.train.AdamOptimizer(learning_rate=1e-3)
+            asn_update = asn_optimizer.minimize(loss)
+
+            ###############################
+
+        init_new_vars_ops = [x.initializer for x in tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES, scope=scope_name)]
+        self.sess.run(init_new_vars_ops)
+
+        # TODO: Change the format for the asns list
+        self.asns.append(act_out)
+        self.asn_details.append({'hidden_dims': hidden_dims})
+        self.n_act_seqs += 1
 
     def create_as_net(self, obs, acts, n_acts=3, batch_size=32, n_epochs=50, test_frac=0.15, hidden_dims=(128,64,)):
         scope_name = f'as_net_{self.n_act_seqs}'
@@ -51,6 +87,7 @@ class HASL():
 
             dense2 = Dense(hidden_dims[1], activation='relu')(dense)
             act_probs = Dense(self.n_curr_acts, activation=None)(dense2)
+            act_out = tf.squeeze(tf.random.multinomial(tf.log(act_probs), 1))
 
             act_ohs = tf.one_hot(act_seq_ph, self.n_curr_acts, dtype=tf.float32)
             
@@ -110,7 +147,9 @@ class HASL():
             print('ASN Epoch {0} | Train acc: {1:.2f}% | Test acc {2:.2f}'.format(
                 epoch, train_acc, test_acc))
 
-        # TODO: Add to list of act sequences
+        # TODO: Change the format for the asns list
+        self.asns.append(act_out)
+        self.asn_details.append({'hidden_dims': hidden_dims})
         self.n_act_seqs += 1
 
     def create_phs(self, state_shape=(42, 42), state_depth=1):
@@ -125,8 +164,8 @@ class HASL():
             # Creating a conv net for the policy and value estimator
             self.obs_op = Input(shape=(self.enc_dim,))
             dense1 = Dense(256, activation='relu')(self.obs_op)
-            act_dense = Dense(256, activation='relu')(dense1)
-            val_dense = Dense(256, activation='relu')(dense1)
+            act_dense = Dense(256, activation='relu', name='act_dense')(dense1)
+            val_dense = Dense(256, activation='relu', name='val_dense')(dense1)
 
             # Output probability distribution over possible actions
             self.act_probs_op = Dense(n_act_seqs, activation='softmax', name='act_probs')(act_dense)
@@ -173,11 +212,14 @@ class HASL():
             self.combined_loss = self.actor_loss + self.val_coef * self.value_loss + self.entropy_coef * self.entropy
             self.combined_update = self.optimizer.minimize(self.combined_loss)
 
-    def set_act_seqs(self, n_act_seqs):
-        self.n_act_seqs = n_act_seqs
+    def set_act_seqs(self, n_act_seqs=None, reload_weights=True):
+        if n_act_seqs:
+            self.n_act_seqs = n_act_seqs
+        self.n_curr_acts = self.n_act_seqs
 
         ### Save weights and reset graph and session ###
-        saved_weights = self.sess.run(tf.trainable_variables())
+        if reload_weights:
+            saved_weights = self.sess.run(tf.trainable_variables())
 
         tf.reset_default_graph()
         self.sess.close()
@@ -187,27 +229,29 @@ class HASL():
             self.sess = tf.Session(config=self.sess_config)
 
         ### Recreate all ops ###
-        self.create_phs(state_shape=self.state_shape)
+        self.create_phs(state_shape=self.state_shape, state_depth=self.state_depth)
         self.optimizer = tf.train.AdamOptimizer(learning_rate=1e-3)
+        self.enc_optimizer = tf.train.AdamOptimizer(learning_rate=1e-3)
         self.create_encoder_ops(state_shape=self.state_shape, n_base_acts=self.n_base_acts)
         self.create_policy_ops(n_act_seqs=self.n_act_seqs)
 
         ### Reload applicable weights ###
-        self.sess.run(tf.global_variables_initializer())
-        t_vars = tf.trainable_variables()
-        for pair in zip(t_vars, saved_weights):
-            if 'policy/act_probs' not in pair[0].name:
-                self.sess.run(tf.assign(pair[0], pair[1]))
+        if reload_weights:
+            self.sess.run(tf.global_variables_initializer())
+            t_vars = tf.trainable_variables()
+            for pair in zip(t_vars, saved_weights):
+                if 'policy/act_probs' not in pair[0].name:
+                    self.sess.run(tf.assign(pair[0], pair[1]))
 
     # TODO: This function looks weird
-    def choose_action(self, obs, batch_size=1024, epsilon=0.1, possible_acts=None):
-        if possible_acts is None:
-            return self.sess.run(self.act_out, feed_dict={self.obs_op: obs})
-
+    def choose_action(self, obs, batch_size=1024, epsilon=0.1):
         if np.random.rand() < epsilon:
-            return np.random.choice(possible_acts)
+            first_act = np.random.choice(range(self.n_curr_acts))
         else:
-            return self.sess.run(self.act_out, feed_dict={self.obs_op: obs})
+            first_act = self.sess.run(self.act_out, feed_dict={self.obs_op: obs})
+
+        act_stack = []
+        return first_act
 
     def train_policy(self, states, actions, rewards):
         """
@@ -370,3 +414,16 @@ class HASL():
             t_vars = tf.trainable_variables()
             for pair in zip(t_vars, sync_vars):
                 self.sess.run(tf.assign(pair[0], pair[1]))
+
+    def sync_asns(self):
+        if self.rank == self.controller:
+            self.comm.bcast([self.n_curr_acts, self.asn_details], self.controller)
+        else:
+            n_target_acts, details = self.comm.bcast(None, self.controller)
+            for i in range(n_target_acts - self.n_act_seqs):
+                self.create_empty_as_net(hidden_dims=details[i]['hidden_dims'])
+                print(f'{self.rank}: creating ASN with hidden dims: {details[i]["hidden_dims"]}')
+            self.set_act_seqs()
+            print(f'{self.rank}: {self.n_curr_acts} applicable ASNS DUSHGFUISDHFUI')
+
+        self.sync_weights()
