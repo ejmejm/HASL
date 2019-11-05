@@ -39,12 +39,18 @@ class HASL():
         self.encoder_saver = None
         self.sync_weights()
 
-    def create_empty_as_net(self, hidden_dims=(128,64,)):
+    def create_asn_ops(self, n_acts=3, hidden_dims=(128,64,), asn_id=None, n_output_nodes=None, incr_act_seqs=True):
         """
         Used to create an untrained ASN for the purpose of syncing HASL
         models over separate processes.
         """
-        scope_name = f'as_net_{self.n_act_seqs}'
+        if asn_id:
+            scope_name = f'as_net_{asn_id}'
+        else:
+            scope_name = f'as_net_{self.n_act_seqs}'
+
+        if n_output_nodes is None:
+            n_output_nodes = self.n_curr_acts
 
         with tf.variable_scope(scope_name):
             act_seq_ph = tf.placeholder(dtype=tf.int32, shape=(None,))
@@ -55,14 +61,8 @@ class HASL():
             ###############################
 
             dense2 = Dense(hidden_dims[1], activation='relu')(dense)
-            act_probs = Dense(self.n_curr_acts, activation=None)(dense2)
+            act_probs = Dense(n_output_nodes, activation=None)(dense2)
             act_out = tf.squeeze(tf.random.multinomial(tf.log(act_probs), 1))
-
-            act_ohs = tf.one_hot(act_seq_ph, self.n_curr_acts, dtype=tf.float32)
-            
-            loss = tf.losses.softmax_cross_entropy(act_ohs, act_probs)
-            asn_optimizer = tf.train.AdamOptimizer(learning_rate=1e-3)
-            asn_update = asn_optimizer.minimize(loss)
 
             ###############################
 
@@ -71,10 +71,15 @@ class HASL():
 
         # TODO: Change the format for the asns list
         self.asns.append(act_out)
-        self.asn_details.append({'hidden_dims': hidden_dims})
-        self.n_act_seqs += 1
+        self.asn_details.append({'hidden_dims': hidden_dims,
+                                 'branch_factor': n_acts,
+                                 'n_output_nodes': n_output_nodes})
 
-    def create_as_net(self, obs, acts, n_acts=3, batch_size=32, n_epochs=50, test_frac=0.15, hidden_dims=(128,64,)):
+        if incr_act_seqs:
+            self.n_act_seqs += 1
+
+    def create_asn(self, obs, acts, n_acts=3, batch_size=32, n_epochs=50, 
+                      test_frac=0.15, hidden_dims=(128,64,)):
         scope_name = f'as_net_{self.n_act_seqs}'
 
         with tf.variable_scope(scope_name):
@@ -149,7 +154,9 @@ class HASL():
 
         # TODO: Change the format for the asns list
         self.asns.append(act_out)
-        self.asn_details.append({'hidden_dims': hidden_dims})
+        self.asn_details.append({'hidden_dims': hidden_dims,
+                                 'branch_factor': n_acts,
+                                 'n_output_nodes': self.n_curr_acts})
         self.n_act_seqs += 1
 
     def create_phs(self, state_shape=(42, 42), state_depth=1):
@@ -235,6 +242,18 @@ class HASL():
         self.create_encoder_ops(state_shape=self.state_shape, n_base_acts=self.n_base_acts)
         self.create_policy_ops(n_act_seqs=self.n_act_seqs)
 
+        self.asns = []
+        asn_details_copy = self.asn_details
+        self.asn_details = []
+        for i in range(self.n_curr_acts - self.n_base_acts):
+            asn_id = i + self.n_base_acts
+            self.create_asn_ops(
+                n_acts=asn_details_copy[i]['branch_factor'], 
+                hidden_dims=asn_details_copy[i]['hidden_dims'],
+                n_output_nodes=asn_details_copy[i]['n_output_nodes'],
+                asn_id=asn_id,
+                incr_act_seqs=False)
+
         ### Reload applicable weights ###
         if reload_weights:
             self.sess.run(tf.global_variables_initializer())
@@ -244,21 +263,58 @@ class HASL():
                     self.sess.run(tf.assign(pair[0], pair[1]))
 
     # TODO: This function looks weird
-    def choose_action(self, obs, batch_size=1024, epsilon=0.1):
-        if np.random.rand() < epsilon:
-            first_act = np.random.choice(range(self.n_curr_acts))
-        else:
-            first_act = self.sess.run(self.act_out, feed_dict={self.obs_op: obs})
+    def choose_action(self, obs, act_stack=None, batch_size=1024, epsilon=0.1):
+        if act_stack == []:
+            # This should happen when all actions for the macro-step
+            # have already been taken
+            return None, [], None
+        elif act_stack is None:
+            # This should happen on the first step of a macro-step
+            act_stack = [None]
 
-        act_stack = []
-        return first_act
+        master_train_act = None  # First step taken in the macro-action
+                                 # Used to train the master network
+                                 # None if this is not the first step in
+                                 # the macro-action
+
+        # Run until a micro-action is attained
+        while len(act_stack) > 0 and (act_stack[-1] is None or act_stack[-1] >= self.n_base_acts):
+            # Pop the top action
+            next_act = act_stack[-1]
+            act_stack = act_stack[:-1]
+
+            # if np.random.rand() < epsilon:
+            #     act = np.random.choice(range(self.n_curr_acts))
+            if next_act == None:
+                # Triggered for the first step of macro-actions
+                # Runs the controller/master network
+                act = self.sess.run(self.act_out, feed_dict={self.obs_op: obs})
+            elif next_act >= self.n_base_acts:
+                # Triggered for ASN macro-actions
+                asn_idx = next_act - self.n_base_acts
+                act = self.sess.run(self.asns[asn_idx], feed_dict={self.obs_op: obs})
+
+            if next_act is None:
+                master_train_act = act
+
+            if act >= self.n_base_acts:
+                asn_idx = act - self.n_base_acts
+                for i in range(self.asn_details[asn_idx]['branch_factor']):
+                    act_stack.append(act)
+            else:
+                act_stack.append(act)
+
+        micro_act = act_stack[-1]
+        act_stack = act_stack[:-1]
+
+        return micro_act, act_stack, master_train_act
 
     def train_policy(self, states, actions, rewards):
         """
         Trains the policy using PPO. Currently not functional.
         """
         # TODO: Change the way the actions are selected when training the policy
-        actions = [a[0] for a in actions] # Currently like this because actions are singular and of the shape (1,)
+        # actions = [a[0] for a in actions] # Currently like this because actions are singular and of the shape (1,)
         states = np.vstack(states)
 
         self.old_probs, self.old_advantages = self.sess.run([self.resp_acts, self.advantages], 
@@ -283,7 +339,7 @@ class HASL():
         Trains the policy using vanilla policy gradient.
         """
         # TODO: Change the way the actions are selected when training the policy
-        actions = [a[0] for a in actions] # Currently like this because actions are singular and of the shape (1,)
+        # actions = [a[0] for a in actions] # Currently like this because actions are singular and of the shape (1,)
         states = np.vstack(states)
 
         loss = tf.reduce_sum(self.act_masks * self.log_probs, axis=1) * self.advantages
@@ -421,10 +477,8 @@ class HASL():
         else:
             n_target_acts, details = self.comm.bcast(None, self.controller)
             for i in range(n_target_acts - self.n_act_seqs):
-                self.create_empty_as_net(hidden_dims=details[i]['hidden_dims'])
-                print(f'{self.rank}: creating ASN with hidden dims: {details[i]["hidden_dims"]}')
+                self.create_asn_ops(n_acts=details[i]['branch_factor'], hidden_dims=details[i]['hidden_dims'])
             self.set_act_seqs()
-            print(f'{self.rank}: {self.n_curr_acts} applicable ASNS DUSHGFUISDHFUI')
 
         self.sync_weights()
 

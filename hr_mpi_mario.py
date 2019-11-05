@@ -91,7 +91,6 @@ def filter_obs(obs, obs_shape=(OBS_DIM, OBS_DIM)):
     obs = cv2.cvtColor(obs, cv2.COLOR_BGR2GRAY)
     return obs / 255
 
-
 def worker(action_sets, hasl, max_steps=1000, act_epsilon=0.1, obs_stack_size=4):
     """
     Performs the game simulation, and is called across all processes.
@@ -133,14 +132,20 @@ def worker(action_sets, hasl, max_steps=1000, act_epsilon=0.1, obs_stack_size=4)
         # act_set = action_sets[act_idx]
 
         # TODO: The method for generating act_sets seems strange
-        act_set = [hasl.choose_action(enc_full_obs, epsilon=act_epsilon)]
-        if act_set[0] > 11:
-            print(f'AAA: {act_set[0]}')
-            act_set[0] = 0
+        # act_set = [hasl.choose_action(enc_full_obs, epsilon=act_epsilon)]
+        # if act_set[0] > 11:
+        #     print(f'AAA: {act_set[0]}')
+        #     act_set[0] = 0
+
+        act, act_stack, master_act = hasl.choose_action(
+            enc_full_obs, act_stack=None, epsilon=act_epsilon)
+
+        # print(hasl.rank, act, act_stack, master_act)
 
         train_data.append([enc_full_obs])
         step_reward = 0
-        for act in act_set:
+        while act is not None:
+            # Continuously called until the macro-action is over
             full_data.append([l_obs_stack.get_stack()])
             obs_p, r, d, _ = env.step(act)
             obs_p = filter_obs(obs_p)
@@ -150,11 +155,16 @@ def worker(action_sets, hasl, max_steps=1000, act_epsilon=0.1, obs_stack_size=4)
             step += 1
             if d or step >= max_steps:
                 break
+            act, act_stack, _ = hasl.choose_action(
+                enc_full_obs, act_stack=act_stack, epsilon=act_epsilon)
+            
+            # print(hasl.rank, act, act_stack, master_act)
+
         ep_reward += step_reward
 
         h_obs_stack.push(obs_p)
         enc_full_obs = hasl.apply_encoder([h_obs_stack.get_stack()])
-        train_data[-1].extend([act_set, step_reward, enc_full_obs])
+        train_data[-1].extend([master_act, step_reward, enc_full_obs])
 
         if d or step >= max_steps:
             break
@@ -266,14 +276,14 @@ if __name__ == '__main__':
         if os.path.exists(encoder_save_path + '.index') and os.path.isfile(encoder_save_path + '.index'):
             hasl.load_encoder(encoder_save_path)
             train_encoder_epochs = 0
-            print('Loaded HASL autoencoder model!')
+            log('Loaded HASL autoencoder model!')
 
     hasl.sync_weights()
 
     for epoch in range(1, n_epochs+1):
         if epoch == train_encoder_epochs + 1:
             if rank == controller:
-                print('Starting policy training!')
+                log('Starting policy training!')
             act_epsilon = target_act_epsilon
 
         if epoch % asn_proposal_delay == 0:
@@ -302,10 +312,10 @@ if __name__ == '__main__':
             encoder_data = np.concatenate(encoder_data)
             cat_train_data = np.concatenate(train_data)
         
-            print(f'----- Epoch {epoch} -----')
+            log(f'----- Epoch {epoch} -----')
 
-            print('# micro steps: {}'.format(len(encoder_data)))
-            print('# macro steps: {}'.format(len(cat_train_data)))
+            log('# micro steps: {}'.format(len(encoder_data)))
+            log('# macro steps: {}'.format(len(cat_train_data)))
 
         ###### End of data gathering, start of training ######
 
@@ -321,11 +331,11 @@ if __name__ == '__main__':
                 train_state_ps = encoder_data[:, 3]
                     
                 loss = hasl.train_encoder(train_states, batch_size=128, save_path=encoder_save_path)
-                print(f'Auto encoder loss: {loss}')
+                log(f'Auto encoder loss: {loss}')
             else:
                 ### Pull rewards and action sequences from the training data ###
 
-                print(
+                log(
                     f'Avg Reward: {np.mean(all_rewards)}, Min: {np.min(all_rewards)}, Max: {np.max(all_rewards)}, Std: {np.std(all_rewards)}')
 
                 if epoch % asn_proposal_delay == 0:
@@ -340,7 +350,7 @@ if __name__ == '__main__':
                     for ep in range(len(train_data)):
                         real_step = 0
                         for step in range(seq_len, len(train_data[ep])):
-                            real_step += len(train_data[ep][step][1])
+                            real_step += 1 # len(train_data[ep][step][1])
                             # ss.append([real_step, train_data[ep][step][0]])
                             # state_changes.append([real_step, train_data[ep][step][0] - train_data[ep][step-seq_len][0]])
                             state_changes.append(
@@ -394,14 +404,14 @@ if __name__ == '__main__':
                     obs = obs.reshape(obs.shape[0], -1, obs.shape[-1])
                     acts = np.asarray(acts).reshape(obs.shape[0], -1)
 
-                    print(obs.shape, acts.shape)
+                    log(str(obs.shape) + ' ' + str(acts.shape))
 
                     # TODO: Make an initial period where this doesn't happen for x epochs
                     # so that the autoencoder has time to learn more stabely
                     for i in range(n_as_proposals):
-                        print('Training new ASN #{}'.format(i+1))
-                        hasl.create_as_net(obs[i], acts[i], n_acts=act_branch_factor, n_epochs=10,
-                            hidden_dims=(64,32,))
+                        log('Training new ASN #{}'.format(i+1))
+                        hasl.create_asn(obs[i], acts[i], n_acts=act_branch_factor, n_epochs=10,
+                            hidden_dims=(32,32,))
                     hasl.set_act_seqs()
                     hasl.sync_asns()
                     
@@ -427,4 +437,4 @@ if __name__ == '__main__':
         gc.collect()
 
     if rank == controller:
-        print('done')
+        log('done')
