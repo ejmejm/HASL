@@ -427,3 +427,18 @@ class HASL():
             print(f'{self.rank}: {self.n_curr_acts} applicable ASNS DUSHGFUISDHFUI')
 
         self.sync_weights()
+
+    def is_model_synced(self):
+        if self.rank == self.controller:
+            t_vars = self.comm.gather(self.sess.run(tf.trainable_variables()), self.controller)
+            for p_id in range(len(t_vars)):
+                if p_id == self.controller:
+                    continue
+                
+                for var1, var2 in zip(t_vars[self.controller], t_vars[p_id]):
+                    if (var1 != var2).any():
+                        return False
+
+            return True
+        else:
+            self.comm.gather(self.sess.run(tf.trainable_variables()), self.controller)

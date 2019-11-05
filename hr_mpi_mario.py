@@ -420,7 +420,11 @@ if __name__ == '__main__':
             ### Incorporate the new action sequences into its list for further training and sync models ###
             train_act_sets = comm.bcast(None, controller)
 
+        # synced = hasl.is_model_synced()
+        # if rank == controller:
+        #     print(f'Model Synced: {synced}')
+
         gc.collect()
 
-    if rank == 0:
+    if rank == controller:
         print('done')
