@@ -3,6 +3,8 @@ from tensorflow import keras
 import tensorflow as tf
 import numpy as np
 
+from utils import log
+
 class HASL():
     def __init__(self, comm, controller, rank, sess_config=None, 
                  state_shape=(42, 42), state_depth=1, n_base_acts=12,
@@ -128,7 +130,7 @@ class HASL():
             correct_preds = (pred_acts == test_acts).sum()
             test_acc = correct_preds/len(test_obs)*100
                 
-            print('ASN Epoch {0} | Train acc: {1:.2f}% | Test acc {2:.2f}'.format(
+            log('ASN Epoch {0} | Train acc: {1:.2f}% | Test acc {2:.2f}'.format(
                 epoch, train_acc, test_acc))
 
         # TODO: Change the format for the asns list
@@ -309,7 +311,7 @@ class HASL():
             if kl_div > 1.5 * self.target_kl:
                 break
     
-        print('# PPO updates: {}'.format(i+1))
+        # print('# PPO updates: {}'.format(i+1))
     
     def train_vanilla_policy(self, states, actions, rewards):
         """
@@ -380,7 +382,7 @@ class HASL():
                 self.dec_state = self.dec_layers[i](self.dec_state)
 
             self.enc_dim = self.enc_vector.shape[-1] # Encoded Feature Dimension
-            print('Encoder output dimensions:', self.enc_dim)
+            # print('Encoder output dimensions:', self.enc_dim)
 
             # State encoder train ops
             self.auto_enc_loss = tf.reduce_mean(tf.keras.losses.mean_squared_error(self.state_ph, self.dec_state))
@@ -426,7 +428,7 @@ class HASL():
             self.saver = tf.train.Saver(tf.trainable_variables(scope='auto_encoder'))
 
         self.saver.save(self.sess, path)
-        print('Saved encoder model to {}'.format(path))
+        log('Saved encoder model to {}'.format(path))
 
     def load_encoder(self, path):
         """
