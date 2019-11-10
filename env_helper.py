@@ -1,6 +1,5 @@
 import cv2
 import numpy as np
-from ludus.utils import discount_rewards
 from sklearn.neighbors import LSHForest
 
 from utils import OBS_DIM
@@ -61,6 +60,24 @@ def filter_obs(obs, obs_shape=(OBS_DIM, OBS_DIM)):
     obs = cv2.resize(obs, obs_shape, interpolation=cv2.INTER_LINEAR)
     obs = cv2.cvtColor(obs, cv2.COLOR_BGR2GRAY)
     return obs / 255
+
+def discount_rewards(rewards, gamma=0.99):
+    """Discounts an array of rewarwds, generally used after
+    an episode ends and before training.
+    Args:
+        rewards (:obj:`list` of float): The rewards to be discounted.
+        gamma (float, optional): Gamma in the reward discount function.
+            Higher gamma = higher importance on later rewards.
+    Returns:
+        (:obj:`list` of float): List of the disounted rewards.
+    Examples:
+        >>> print([round(x) for x in discount_rewards([1, 2, 3], gamma=0.99)])
+            [5.92, 4.97, 3.0]
+    """
+    new_rewards = [float(rewards[-1])]
+    for i in reversed(range(len(rewards)-1)):
+        new_rewards.append(float(rewards[i]) + gamma * new_rewards[-1])
+    return new_rewards[::-1]
 
 ### Environment tasks ###
 
