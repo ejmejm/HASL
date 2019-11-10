@@ -51,20 +51,17 @@ class HASL():
 
         if n_output_nodes is None:
             n_output_nodes = self.n_curr_acts
+        
+        ### Define the model ops ###
 
         with tf.variable_scope(scope_name):
             act_seq_ph = tf.placeholder(dtype=tf.int32, shape=(None,))
             flat_act_seqs = tf.reshape(act_seq_ph, (-1,))
 
             dense = Dense(hidden_dims[0], activation='relu')(self.obs_op)
-            
-            ###############################
-
             dense2 = Dense(hidden_dims[1], activation='relu')(dense)
             act_probs = Dense(n_output_nodes, activation=None)(dense2)
             act_out = tf.squeeze(tf.random.multinomial(tf.log(act_probs), 1))
-
-            ###############################
 
         init_new_vars_ops = [x.initializer for x in tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES, scope=scope_name)]
         self.sess.run(init_new_vars_ops)
@@ -82,14 +79,13 @@ class HASL():
                       test_frac=0.15, hidden_dims=(128,64,)):
         scope_name = f'as_net_{self.n_act_seqs}'
 
+        ### Define the model ops ###
+
         with tf.variable_scope(scope_name):
             act_seq_ph = tf.placeholder(dtype=tf.int32, shape=(None,))
             flat_act_seqs = tf.reshape(act_seq_ph, (-1,))
 
             dense = Dense(hidden_dims[0], activation='relu')(self.obs_op)
-            
-            ###############################
-
             dense2 = Dense(hidden_dims[1], activation='relu')(dense)
             act_probs = Dense(self.n_curr_acts, activation=None)(dense2)
             act_out = tf.squeeze(tf.random.multinomial(tf.log(act_probs), 1))
@@ -99,23 +95,6 @@ class HASL():
             loss = tf.losses.softmax_cross_entropy(act_ohs, act_probs)
             asn_optimizer = tf.train.AdamOptimizer(learning_rate=1e-3)
             asn_update = asn_optimizer.minimize(loss)
-
-            ###############################
-
-            # act_probs = []
-            # act_ohs = []
-            # losses = []
-            # for i in range(n_acts):
-            #     act_indices = tf.range(i, tf.shape(flat_act_seqs)[0], n_acts)
-            #     resp_acts = tf.gather(flat_act_seqs, act_indices)
-            #     act_ohs.append(tf.one_hot(resp_acts, self.n_curr_acts, dtype=tf.float32))
-            #     dense2 = Dense(hidden_dims[1], activation='relu')(dense)
-            #     act_probs.append(Dense(self.n_curr_acts, activation=None)(dense2))
-            #     losses.append(tf.losses.softmax_cross_entropy(act_ohs[i], act_probs[-1]))
-                
-            # as_optimizer = tf.train.AdamOptimizer(learning_rate=1e-3)
-            # total_loss = tf.math.add_n(losses)
-            # as_update = as_optimizer.minimize(total_loss)
 
         init_new_vars_ops = [x.initializer for x in tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES, scope=scope_name)]
         self.sess.run(init_new_vars_ops)
@@ -283,9 +262,9 @@ class HASL():
             next_act = act_stack[-1]
             act_stack = act_stack[:-1]
 
-            # if np.random.rand() < epsilon:
-            #     act = np.random.choice(range(self.n_curr_acts))
-            if next_act == None:
+            if np.random.rand() < epsilon:
+                act = np.random.choice(range(self.n_curr_acts))
+            elif next_act == None:
                 # Triggered for the first step of macro-actions
                 # Runs the controller/master network
                 act = self.sess.run(self.act_out, feed_dict={self.obs_op: obs})
@@ -313,8 +292,6 @@ class HASL():
         """
         Trains the policy using PPO. Currently not functional.
         """
-        # TODO: Change the way the actions are selected when training the policy
-        # actions = [a[0] for a in actions] # Currently like this because actions are singular and of the shape (1,)
         states = np.vstack(states)
 
         self.old_probs, self.old_advantages = self.sess.run([self.resp_acts, self.advantages], 
@@ -338,8 +315,6 @@ class HASL():
         """
         Trains the policy using vanilla policy gradient.
         """
-        # TODO: Change the way the actions are selected when training the policy
-        # actions = [a[0] for a in actions] # Currently like this because actions are singular and of the shape (1,)
         states = np.vstack(states)
 
         loss = tf.reduce_sum(self.act_masks * self.log_probs, axis=1) * self.advantages

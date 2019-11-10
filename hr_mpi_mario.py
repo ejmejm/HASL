@@ -91,7 +91,7 @@ def filter_obs(obs, obs_shape=(OBS_DIM, OBS_DIM)):
     obs = cv2.cvtColor(obs, cv2.COLOR_BGR2GRAY)
     return obs / 255
 
-def worker(action_sets, hasl, max_steps=1000, act_epsilon=0.1, obs_stack_size=4):
+def worker(hasl, max_steps=1000, act_epsilon=0.1, obs_stack_size=4):
     """
     Performs the game simulation, and is called across all processes.
 
@@ -128,19 +128,8 @@ def worker(action_sets, hasl, max_steps=1000, act_epsilon=0.1, obs_stack_size=4)
     ep_reward = 0
     step = 0
     while step < max_steps:
-        # act_idx = np.random.randint(len(action_sets))
-        # act_set = action_sets[act_idx]
-
-        # TODO: The method for generating act_sets seems strange
-        # act_set = [hasl.choose_action(enc_full_obs, epsilon=act_epsilon)]
-        # if act_set[0] > 11:
-        #     print(f'AAA: {act_set[0]}')
-        #     act_set[0] = 0
-
         act, act_stack, master_act = hasl.choose_action(
             enc_full_obs, act_stack=None, epsilon=act_epsilon)
-
-        # print(hasl.rank, act, act_stack, master_act)
 
         train_data.append([enc_full_obs])
         step_reward = 0
@@ -157,8 +146,6 @@ def worker(action_sets, hasl, max_steps=1000, act_epsilon=0.1, obs_stack_size=4)
                 break
             act, act_stack, _ = hasl.choose_action(
                 enc_full_obs, act_stack=act_stack, epsilon=act_epsilon)
-            
-            # print(hasl.rank, act, act_stack, master_act)
 
         ep_reward += step_reward
 
@@ -224,6 +211,10 @@ parser.add_argument('-ae', '--act_epsilon', dest='act_epsilon', type=float,
     default=1., help='Initial chance of taking a random action')
 parser.add_argument('-tae', '--target_act_epsilon', dest='target_act_epsilon', type=float,
     default=0.1, help='The final target probability of taking a random action')
+parser.add_argument('-l', '--log_path', dest='log_path', type=str,
+    default='training.log', help='Path to save the log to')
+parser.add_argument('-d', '--dump_train_data', dest='dump_train_data', type=bool,
+    default=False, help='Whether or not to dump the training data to a pickle')
 
 if __name__ == '__main__':
     ### Setp for MPI ###
@@ -251,25 +242,17 @@ if __name__ == '__main__':
     train_encoder_epochs = args.train_encoder_epochs
     act_epsilon = args.act_epsilon
     target_act_epsilon = args.target_act_epsilon
-    train_act_sets = [[i] for i in range(0, 7)]
     encoder_save_path = 'models/encoder.h5'
 
-    init_logger('progress.log')
+    init_logger(args.log_path)
 
     if rank == controller:
+        log('Args: ' + str(args))
         device_config = tf.ConfigProto()
         use_device = tf.device('/cpu:0')
     else:
         device_config = tf.ConfigProto(device_count={'GPU': 0})
-        # n_cpus = multiprocessing.cpu_count()
-        # device_config = tf.ConfigProto(device_count={'GPU': 0, 'CPU': n_cpus},
-        #                 inter_op_parallelism_threads=n_cpus,
-        #                 intra_op_parallelism_threads=1,
-        #                 log_device_placement=True)
-        # print(rank % n_cpus)
-        # use_device = tf.device(f'/cpu:{rank % n_cpus}')
 
-    # with use_device:
     hasl = HASL(comm, controller, rank, state_shape=(OBS_DIM, OBS_DIM), state_depth=OBS_DEPTH, sess_config=device_config)
 
     if rank == controller:
@@ -298,14 +281,14 @@ if __name__ == '__main__':
             ### Simulate more episodes to gain training data ###
             if rank == controller:
                 all_data = comm.gather(
-                    worker(train_act_sets, hasl, act_epsilon=act_epsilon, obs_stack_size=OBS_DEPTH, 
+                    worker(hasl, act_epsilon=act_epsilon, obs_stack_size=OBS_DEPTH, 
                            max_steps=max_rollout_steps), controller)
                 new_train_data = [x[0] for x in all_data]
                 train_data.extend(new_train_data)
                 encoder_data.extend([x[1] for x in all_data])
                 all_rewards.extend([sum(x[2]) for x in all_data])
             else:
-                comm.gather(worker(train_act_sets, hasl, act_epsilon=act_epsilon,
+                comm.gather(worker(hasl, act_epsilon=act_epsilon,
                                    obs_stack_size=OBS_DEPTH, max_steps=max_rollout_steps), controller)
 
         if rank == controller:
@@ -318,10 +301,6 @@ if __name__ == '__main__':
             log('# macro steps: {}'.format(len(cat_train_data)))
 
         ###### End of data gathering, start of training ######
-
-            if epoch % log_freq == 0:
-                log(f'Epoch {epoch} train action sets:')
-                log(str(train_act_sets) + '\n')
             
             if epoch <= train_encoder_epochs:
                 ### Train auto encoder model ###
@@ -345,14 +324,9 @@ if __name__ == '__main__':
                     all_states = []
                     act_seqs = []
                     reward_list = []
-                    # ss = []
                     seq_len = act_branch_factor
                     for ep in range(len(train_data)):
-                        real_step = 0
                         for step in range(seq_len, len(train_data[ep])):
-                            real_step += 1 # len(train_data[ep][step][1])
-                            # ss.append([real_step, train_data[ep][step][0]])
-                            # state_changes.append([real_step, train_data[ep][step][0] - train_data[ep][step-seq_len][0]])
                             state_changes.append(
                                 train_data[ep][step][0] - train_data[ep][step-seq_len][0])
                             all_states.append(train_data[ep][step-seq_len:step, 0])
@@ -383,8 +357,9 @@ if __name__ == '__main__':
                     as_net_train_data = find_neighbors(
                         top_samples, state_changes, n=n_asn_train_samples)
 
-                    # with open('sc.pickle', 'wb') as f:
-                    #     pickle.dump([state_changes, all_states, act_seqs, as_net_train_data], f)
+                    if args.dump_train_data:
+                        with open('sc.pickle', 'wb') as f:
+                            pickle.dump([state_changes, all_states, act_seqs, as_net_train_data], f)
                     
                     ### Formatting training data for new act set models ###
 
@@ -419,16 +394,11 @@ if __name__ == '__main__':
                     hasl.train_policy(
                         cat_train_data[:, 0], cat_train_data[:, 1], cat_train_data[:, 2])
                     hasl.sync_weights()
-
-            ### Send the new action sequences to each process and sync models ###
-            comm.bcast(train_act_sets, controller)
         else:
             if epoch % asn_proposal_delay == 0:
                 hasl.sync_asns()
             else:
                 hasl.sync_weights()
-            ### Incorporate the new action sequences into its list for further training and sync models ###
-            train_act_sets = comm.bcast(None, controller)
 
         # synced = hasl.is_model_synced()
         # if rank == controller:
