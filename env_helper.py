@@ -86,7 +86,7 @@ def make_env():
     env = BinarySpaceToDiscreteSpaceEnv(env, COMPLEX_MOVEMENT)
     return env
 
-def worker(hasl, max_steps=1000, act_epsilon=0.1, obs_stack_size=4):
+def worker(hasl, max_steps=1000, act_epsilon=0.1, obs_stack_size=4, return_micro_data=True, return_macro_data=True):
     """
     Performs the game simulation, and is called across all processes.
 
@@ -107,8 +107,15 @@ def worker(hasl, max_steps=1000, act_epsilon=0.1, obs_stack_size=4):
 
         rewards (np.ndarray): Array containing the low-level rewards at each step.
     """
-    train_data = []
-    full_data = []
+    if return_macro_data:
+        train_data = []
+    else:
+        train_data = None
+    if return_micro_data:
+        full_data = []
+    else:
+        full_data = None
+
     env = make_env()
 
     obs = env.reset()
@@ -116,9 +123,11 @@ def worker(hasl, max_steps=1000, act_epsilon=0.1, obs_stack_size=4):
     h_obs_stack = ObsStack(obs.shape, obs_stack_size) # High-level obs stack
     h_obs_stack.push(obs)
     enc_full_obs = hasl.apply_encoder([h_obs_stack.get_stack()])
+    rewards = []
 
-    l_obs_stack = ObsStack(obs.shape, obs_stack_size) # Low-level obs stack
-    l_obs_stack.push(obs)
+    if return_micro_data:
+        l_obs_stack = ObsStack(obs.shape, obs_stack_size) # Low-level obs stack
+        l_obs_stack.push(obs)
     
     ep_reward = 0
     step = 0
@@ -126,15 +135,20 @@ def worker(hasl, max_steps=1000, act_epsilon=0.1, obs_stack_size=4):
         act, act_stack, master_act = hasl.choose_action(
             enc_full_obs, act_stack=None, epsilon=act_epsilon)
 
-        train_data.append([enc_full_obs])
+        if return_macro_data:
+            train_data.append([enc_full_obs])
         step_reward = 0
         while act is not None:
             # Continuously called until the macro-action is over
-            full_data.append([l_obs_stack.get_stack()])
+            if return_micro_data:
+                full_data.append([l_obs_stack.get_stack()])
             obs_p, r, d, _ = env.step(act)
             obs_p = filter_obs(obs_p)
-            l_obs_stack.push(obs_p)
-            full_data[-1].extend([act, r, l_obs_stack.get_stack()])
+            if return_micro_data:
+                l_obs_stack.push(obs_p)
+            if return_macro_data:
+                full_data[-1].extend([act, r, l_obs_stack.get_stack()])
+            rewards.append(r)
             step_reward += r
             step += 1
             if d or step >= max_steps:
@@ -144,21 +158,23 @@ def worker(hasl, max_steps=1000, act_epsilon=0.1, obs_stack_size=4):
 
         ep_reward += step_reward
 
-        h_obs_stack.push(obs_p)
-        enc_full_obs = hasl.apply_encoder([h_obs_stack.get_stack()])
-        train_data[-1].extend([master_act, step_reward, enc_full_obs])
+        if return_macro_data:
+            h_obs_stack.push(obs_p)
+            enc_full_obs = hasl.apply_encoder([h_obs_stack.get_stack()])
+            train_data[-1].extend([master_act, step_reward, enc_full_obs])
 
         if d or step >= max_steps:
             break
 
-    train_data = np.asarray(train_data)
-    full_data = np.asarray(full_data)
+    ### Shape rewards ###
 
-    rewards = np.copy(full_data[:, 2])
+    if return_macro_data:
+        train_data = np.asarray(train_data)
+        train_data[:, 2] = discount_rewards(train_data[:, 2])
 
-    # Discount rewards
-    train_data[:, 2] = discount_rewards(train_data[:, 2])
-    full_data[:, 2] = discount_rewards(full_data[:, 2])
+    if return_micro_data:
+        full_data = np.asarray(full_data)
+        full_data[:, 2] = discount_rewards(full_data[:, 2])
 
     return train_data, full_data, rewards
 

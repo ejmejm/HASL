@@ -63,7 +63,7 @@ class HASL():
             dense = Dense(hidden_dims[0], activation='relu')(self.obs_op)
             dense2 = Dense(hidden_dims[1], activation='relu')(dense)
             act_probs = Dense(n_output_nodes, activation=None)(dense2)
-            act_out = tf.squeeze(tf.random.multinomial(tf.log(act_probs), 1))
+            act_out = tf.squeeze(tf.random.categorical(tf.log(act_probs), 1))
 
         init_new_vars_ops = [x.initializer for x in tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES, scope=scope_name)]
         self.sess.run(init_new_vars_ops)
@@ -90,7 +90,7 @@ class HASL():
             dense = Dense(hidden_dims[0], activation='relu')(self.obs_op)
             dense2 = Dense(hidden_dims[1], activation='relu')(dense)
             act_probs = Dense(self.n_curr_acts, activation=None)(dense2)
-            act_out = tf.squeeze(tf.random.multinomial(tf.log(act_probs), 1))
+            act_out = tf.squeeze(tf.random.categorical(tf.log(act_probs), 1))
 
             act_ohs = tf.one_hot(act_seq_ph, self.n_curr_acts, dtype=tf.float32)
             
@@ -157,7 +157,7 @@ class HASL():
 
             # Output probability distribution over possible actions
             self.act_probs_op = Dense(n_act_seqs, activation='softmax', name='act_probs')(act_dense)
-            self.act_out = tf.squeeze(tf.random.multinomial(tf.log(self.act_probs_op), 1))
+            self.act_out = tf.squeeze(tf.random.categorical(tf.log(self.act_probs_op), 1))
 
             # Output value of observed state
             self.value_op = Dense(1)(val_dense)

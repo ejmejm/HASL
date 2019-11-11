@@ -43,6 +43,8 @@ parser.add_argument('-d', '--dump_train_data', dest='dump_train_data', type=bool
     default=False, help='Whether or not to dump the training data to a pickle')
 parser.add_argument('-esp', '--encoder_save_path', dest='encoder_save_path', type=str,
     default='models/encoder.h5', help='Path to save encoder model to if one does not already exist')
+parser.add_argument('-ate', '--n_asn_train_epochs', dest='n_asn_train_epochs', type=int,
+    default=5, help='Number of epochs to train each ASN')
 
 if __name__ == '__main__':
     ### Setp for MPI ###
@@ -54,14 +56,13 @@ if __name__ == '__main__':
     ### Define starting parameters ###
     args = parser.parse_args()
 
+    init_logger(args.log_path)
+
     n_process_batches = int(args.n_rollouts / n_processes)
     n_asn_process_batches = int(args.n_asn_rollouts / n_processes)
     # min_branch, max_branch = 2, 3
 
-    init_logger(args.log_path)
-
     if rank == controller:
-        log('Args: ' + str(args))
         device_config = tf.ConfigProto()
         use_device = tf.device('/cpu:0')
     else:
@@ -69,6 +70,7 @@ if __name__ == '__main__':
 
     hasl = HASL(comm, controller, rank, state_shape=(OBS_DIM, OBS_DIM), state_depth=OBS_DEPTH, sess_config=device_config)
 
+    ### Load enoder model if it exists ###
     if rank == controller:
         if os.path.exists(args.encoder_save_path + '.index') and \
                  os.path.isfile(args.encoder_save_path + '.index'):
@@ -78,6 +80,10 @@ if __name__ == '__main__':
 
     hasl.sync_weights()
 
+    if rank == controller:
+        log('Args: ' + str(args))
+
+    ### Main training loop ###
     for epoch in range(1, args.n_epochs+1):
         if epoch == args.train_encoder_epochs + 1:
             if rank == controller:
@@ -127,12 +133,11 @@ if __name__ == '__main__':
                 loss = hasl.train_encoder(train_states, batch_size=128, save_path=args.encoder_save_path)
                 log(f'Auto encoder loss: {loss}')
             else:
-                ### Pull rewards and action sequences from the training data ###
-
-                log(
-                    f'Avg Reward: {np.mean(all_rewards)}, Min: {np.min(all_rewards)}, Max: {np.max(all_rewards)}, Std: {np.std(all_rewards)}')
+                log(f'Avg Reward: {np.mean(all_rewards)}, Min: {np.min(all_rewards)}, Max: {np.max(all_rewards)}, Std: {np.std(all_rewards)}')
 
                 if epoch % args.asn_proposal_delay == 0:
+                    ### Create and train new ASNs ###
+
                     ### Calculate state differences ###
 
                     state_changes = []
@@ -200,12 +205,14 @@ if __name__ == '__main__':
                     # so that the autoencoder has time to learn more stabely
                     for i in range(args.n_asn_proposals):
                         log('Training new ASN #{}'.format(i+1))
-                        hasl.create_asn(obs[i], acts[i], n_acts=args.act_branch_factor, n_epochs=10,
+                        hasl.create_asn(obs[i], acts[i], n_acts=args.act_branch_factor, n_epochs=args.n_asn_train_epochs,
                             hidden_dims=(32,32,))
                     hasl.set_act_seqs()
                     hasl.sync_asns()
                     
                 else:
+                    ### Train master network policy ###
+
                     hasl.train_policy(
                         cat_train_data[:, 0], cat_train_data[:, 1], cat_train_data[:, 2])
                     hasl.sync_weights()
