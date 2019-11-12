@@ -2,7 +2,7 @@ import cv2
 import numpy as np
 from sklearn.neighbors import LSHForest
 
-from utils import OBS_DIM
+from utils import OBS_DIM, OBS_DEPTH
 from hasl_model import HASL
 
 # Super Mario stuff
@@ -146,7 +146,7 @@ def worker(hasl, max_steps=1000, act_epsilon=0.1, obs_stack_size=4, return_micro
             obs_p = filter_obs(obs_p)
             if return_micro_data:
                 l_obs_stack.push(obs_p)
-            if return_macro_data:
+            if return_micro_data:
                 full_data[-1].extend([act, r, l_obs_stack.get_stack()])
             rewards.append(r)
             step_reward += r
@@ -177,6 +177,48 @@ def worker(hasl, max_steps=1000, act_epsilon=0.1, obs_stack_size=4, return_micro
         full_data[:, 2] = discount_rewards(full_data[:, 2])
 
     return train_data, full_data, rewards
+
+def gather_data(comm, rank, controller, hasl, args, n_batches, data_type='both', concat_data=True):
+    train_data = []
+    encoder_data = []
+    all_rewards = []
+    for _ in range(n_batches):
+        ### Simulate more episodes to gain training data ###
+        if data_type == 'policy':
+            all_data = comm.gather(
+                worker(hasl, act_epsilon=args.act_epsilon, obs_stack_size=OBS_DEPTH,
+                        max_steps=args.max_rollout_steps, return_micro_data=False), controller)
+        elif data_type == 'encoder':
+            all_data = comm.gather(
+                worker(hasl, act_epsilon=args.act_epsilon, obs_stack_size=OBS_DEPTH,
+                        max_steps=args.max_rollout_steps, return_macro_data=False), controller)
+        else:
+            all_data = comm.gather(
+                worker(hasl, act_epsilon=args.act_epsilon, obs_stack_size=OBS_DEPTH, 
+                        max_steps=args.max_rollout_steps), controller)
+                            
+        if rank == controller:
+            new_train_data = [x[0] for x in all_data]
+            train_data.extend(new_train_data)
+            encoder_data.extend([x[1] for x in all_data])
+            all_rewards.extend([sum(x[2]) for x in all_data])
+
+    if rank == controller:
+        if data_type == 'policy':
+            if concat_data:
+                train_data = np.concatenate(train_data)
+            encoder_data = None
+        elif data_type == 'encoder':
+            if concat_data:
+                encoder_data = np.concatenate(encoder_data)
+            train_data = None
+        elif concat_data:
+            train_data = np.concatenate(train_data)
+            encoder_data = np.concatenate(encoder_data)
+
+        return train_data, encoder_data, all_rewards
+    
+    return None, None, None
 
 ### Training support algorithms ###
 
