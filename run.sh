@@ -1,0 +1,1 @@
+mpiexec -n 6 python run_hasl.py -ms 1500 -nr 6 -nar 12 -nag 3 -apd 16 -nas 256 -ate 1 -atb 5

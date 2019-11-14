@@ -4,7 +4,7 @@ import gc
 import os
 from mpi4py import MPI
 import tensorflow as tf
-from hasl_model import HASL
+from hasl_model import HASL, ImgEncoder
 import multiprocessing
 import pickle
 
@@ -22,13 +22,17 @@ parser.add_argument('-ms', '--max_rollout_steps', dest='max_rollout_steps', type
 parser.add_argument('-nr', '--n_rollouts', dest='n_rollouts', type=int,
     default=4, help='Number of rollouts per epoch.')
 parser.add_argument('-nar', '--n_asn_rollouts', dest='n_asn_rollouts', type=int,
-    default=32, help='Number of rollouts used for training an ASN')
+    default=4, help='Number of rollouts used for training an ASN per batch')
 parser.add_argument('-nag', '--n_asn_gen', dest='n_asn_proposals', type=int,
     default=5, help='Number of ASNs created in one training cycle')
 parser.add_argument('-apd', '--asn_proposal_delay', dest='asn_proposal_delay', type=int,
     default=8, help='Number of epochs in between ASN generation')
 parser.add_argument('-nas', '--n_asn_train_samples', dest='n_asn_train_samples', type=int,
     default=512, help='Number of smaples drawn to train an individual ASN')
+parser.add_argument('-ate', '--n_asn_train_epochs', dest='n_asn_train_epochs', type=int,
+    default=3, help='Number of epochs to train each ASN')
+parser.add_argument('-atb', '--n_asn_train_batches', dest='n_asn_train_batches', type=int,
+    default=5, help='Number of bacthes to gather data and train ASNs')
 parser.add_argument('-b', '--act_branch_factor', dest='act_branch_factor', type=int,
     default=3, help='Number of actions each ASN should execute')
 parser.add_argument('-ee', '--n_encoder_epochs', dest='n_encoder_epochs', type=int,
@@ -43,8 +47,6 @@ parser.add_argument('-d', '--dump_train_data', dest='dump_train_data', type=bool
     default=False, help='Whether or not to dump the training data to a pickle')
 parser.add_argument('-esp', '--encoder_save_path', dest='encoder_save_path', type=str,
     default='models/encoder.h5', help='Path to save encoder model to if one does not already exist')
-parser.add_argument('-ate', '--n_asn_train_epochs', dest='n_asn_train_epochs', type=int,
-    default=5, help='Number of epochs to train each ASN')
 
 if __name__ == '__main__':
     ### Setp for MPI ###
@@ -68,7 +70,7 @@ if __name__ == '__main__':
     else:
         device_config = tf.ConfigProto(device_count={'GPU': 0})
 
-    hasl = HASL(comm, controller, rank, state_shape=(OBS_DIM, OBS_DIM), state_depth=OBS_DEPTH, sess_config=device_config)
+    hasl = HASL(comm, controller, rank, ImgEncoder, state_shape=(OBS_DIM, OBS_DIM), state_depth=OBS_DEPTH, sess_config=device_config)
 
     if rank == controller:
         log('Args: ' + str(args))
@@ -118,88 +120,95 @@ if __name__ == '__main__':
 
     for epoch in range(1, args.n_epochs+1):
         if epoch % args.asn_proposal_delay == 0:
-            # Run rollouts
-            train_data, _, all_rewards = gather_data(
-                comm, rank, controller, hasl, args, n_asn_process_batches, data_type='policy', concat_data=False)
 
             if rank == controller:
-                cat_train_data = np.concatenate(train_data)
-
                 log(f'----- Epoch {epoch} -----')
-                log('# macro steps: {}'.format(len(cat_train_data)))
-                log(f'Avg Reward: {np.mean(all_rewards)}, Min: {np.min(all_rewards)}, Max: {np.max(all_rewards)}, Std: {np.std(all_rewards)}')
 
-                ### Create and train new ASNs ###
+            new_asn_ids = []
+            for i in range(args.n_asn_proposals):
+                asn_id = hasl.create_asn_ops(n_acts=args.act_branch_factor, hidden_dims=(32,32,))
+                new_asn_ids.append(asn_id)
 
-                # Calculate state differences
-                state_changes = []
-                all_states = []
-                act_seqs = []
-                reward_list = []
-                seq_len = args.act_branch_factor
-                for ep in range(len(train_data)):
-                    for step in range(seq_len, len(train_data[ep])):
-                        state_changes.append(
-                            train_data[ep][step][0] - train_data[ep][step-seq_len][0])
-                        all_states.append(train_data[ep][step-seq_len:step, 0])
-                        act_seqs.append(train_data[ep][step-seq_len:step, 1])
-                        reward_list.append(
-                            sum(train_data[ep][step-seq_len:step, 2]))
+            for asn_epoch in range(args.n_asn_train_batches):
+                # Run rollouts
+                train_data, _, all_rewards = gather_data(
+                    comm, rank, controller, hasl, args, n_asn_process_batches, data_type='policy', concat_data=False)
 
-                state_changes = np.asarray(state_changes).squeeze()
-                all_states = np.asarray(all_states).squeeze()
-                act_seqs = np.asarray(act_seqs)
+                if rank == controller:
+                    cat_train_data = np.concatenate(train_data)
 
-                ### Use scaled on rewards to stochastically choose which episodes to pull actions from ###
+                    log('# macro steps: {}'.format(len(cat_train_data)))
+                    log(f'Avg Reward: {np.mean(all_rewards)}, Min: {np.min(all_rewards)}, Max: {np.max(all_rewards)}, Std: {np.std(all_rewards)}')
 
-                scaled_rewards = np.asarray(reward_list)
-                zero_dist = min(reward_list)
-                scaled_rewards -= zero_dist
-                total_reward = sum(scaled_rewards)
-                scaled_rewards /= total_reward
+                    ### Create and train new ASNs ###
 
-                top_ids = np.random.choice(
-                    range(len(scaled_rewards)), size=args.n_asn_proposals, replace=False, p=scaled_rewards)
-                top_samples = [state_changes[i] for i in top_ids] # List of the central samples
+                    # Calculate state differences
+                    state_changes = []
+                    all_states = []
+                    act_seqs = []
+                    reward_list = []
+                    seq_len = args.act_branch_factor
+                    for ep in range(len(train_data)):
+                        for step in range(seq_len, len(train_data[ep])):
+                            state_changes.append(
+                                train_data[ep][step][0] - train_data[ep][step-seq_len][0])
+                            all_states.append(train_data[ep][step-seq_len:step, 0])
+                            act_seqs.append(train_data[ep][step-seq_len:step, 1])
+                            reward_list.append(
+                                sum(train_data[ep][step-seq_len:step, 2]))
 
-                ### Gather and format data for action sequence proposals ###
+                    state_changes = np.asarray(state_changes).squeeze()
+                    all_states = np.asarray(all_states).squeeze()
+                    act_seqs = np.asarray(act_seqs)
 
-                # Get a list with an entry for each top_sample
-                # Each list contains n indices of the other closest samples
-                as_net_train_data = find_neighbors(
-                    top_samples, state_changes, n=args.n_asn_train_samples)
+                    ### Use scaled on rewards to stochastically choose which episodes to pull actions from ###
 
-                if args.dump_train_data:
-                    with open('sc.pickle', 'wb') as f:
-                        pickle.dump([state_changes, all_states, act_seqs, as_net_train_data], f)
+                    scaled_rewards = np.asarray(reward_list)
+                    zero_dist = min(reward_list)
+                    scaled_rewards -= zero_dist
+                    total_reward = sum(scaled_rewards)
+                    scaled_rewards /= total_reward
+
+                    top_ids = np.random.choice(
+                        range(len(scaled_rewards)), size=args.n_asn_proposals, replace=False, p=scaled_rewards)
+                    top_samples = [state_changes[i] for i in top_ids] # List of the central samples
+
+                    ### Gather and format data for action sequence proposals ###
+
+                    # Get a list with an entry for each top_sample
+                    # Each list contains n indices of the other closest samples
+                    as_net_train_data = find_neighbors(
+                        top_samples, state_changes, n=args.n_asn_train_samples)
+
+                    if args.dump_train_data:
+                        with open('sc.pickle', 'wb') as f:
+                            pickle.dump([state_changes, all_states, act_seqs, as_net_train_data], f)
+                    
+                    ### Formatting training data for new act set models ###
+
+                    obs = []
+                    acts = []
+                    for cluster in as_net_train_data:
+                        obs.append([])
+                        acts.append([])
+                        for idx in cluster:
+                            obs[-1].append(np.vstack(all_states[idx]))
+                            acts[-1].append(np.hstack(act_seqs[idx]))
+
+                    # Collapsing the branches of x over n samples to just be n*x examples
+                    # It is no longer useful to have those dimensions separated for training
+                    # However, it will be useful to bring back if this is switched to an LSTM
+                    obs = np.asarray(obs)
+                    obs = obs.reshape(obs.shape[0], -1, obs.shape[-1])
+                    acts = np.asarray(acts).reshape(obs.shape[0], -1)
+
+                    log(str(obs.shape) + ' ' + str(acts.shape))
+
+                    for i in range(args.n_asn_proposals):
+                        log(f'Training ASN #{new_asn_ids[i]}'.format(i+1))
+                        hasl.train_asn(new_asn_ids[i], obs[i], acts[i], batch_size=32, n_epochs=args.n_asn_train_epochs)
                 
-                ### Formatting training data for new act set models ###
-
-                obs = []
-                acts = []
-                for cluster in as_net_train_data:
-                    obs.append([])
-                    acts.append([])
-                    for idx in cluster:
-                        obs[-1].append(np.vstack(all_states[idx]))
-                        acts[-1].append(np.hstack(act_seqs[idx]))
-
-                # Collapsing the branches of x over n samples to just be n*x examples
-                # It is no longer useful to have those dimensions separated for training
-                # However, it will be useful to bring back if this is switched to an LSTM
-                obs = np.asarray(obs)
-                obs = obs.reshape(obs.shape[0], -1, obs.shape[-1])
-                acts = np.asarray(acts).reshape(obs.shape[0], -1)
-
-                log(str(obs.shape) + ' ' + str(acts.shape))
-
-                # TODO: Make an initial period where this doesn't happen for x epochs
-                # so that the autoencoder has time to learn more stabely
-                for i in range(args.n_asn_proposals):
-                    log('Training new ASN #{}'.format(i+1))
-                    hasl.create_asn(obs[i], acts[i], n_acts=args.act_branch_factor, n_epochs=args.n_asn_train_epochs,
-                        hidden_dims=(32,32,))
-                
+            if rank == controller:
                 hasl.set_act_seqs()
 
             hasl.sync_asns()
