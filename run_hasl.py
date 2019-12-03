@@ -4,7 +4,7 @@ import gc
 import os
 from mpi4py import MPI
 import tensorflow as tf
-from hasl_model import HASL, ImgEncoder
+from hasl_model import HASL, ImgEncoder, RobotEncoder
 import multiprocessing
 import pickle
 
@@ -28,7 +28,7 @@ parser.add_argument('-nag', '--n_asn_gen', dest='n_asn_proposals', type=int,
 parser.add_argument('-apd', '--asn_proposal_delay', dest='asn_proposal_delay', type=int,
     default=8, help='Number of epochs in between ASN generation')
 parser.add_argument('-nas', '--n_asn_train_samples', dest='n_asn_train_samples', type=int,
-    default=512, help='Number of smaples drawn to train an individual ASN')
+    default=512, help='Number of smaples drawn to train an individual ASN per sub-batch')
 parser.add_argument('-ate', '--n_asn_train_epochs', dest='n_asn_train_epochs', type=int,
     default=3, help='Number of epochs to train each ASN')
 parser.add_argument('-atb', '--n_asn_train_batches', dest='n_asn_train_batches', type=int,
@@ -47,6 +47,8 @@ parser.add_argument('-d', '--dump_train_data', dest='dump_train_data', type=bool
     default=False, help='Whether or not to dump the training data to a pickle')
 parser.add_argument('-esp', '--encoder_save_path', dest='encoder_save_path', type=str,
     default='models/encoder.h5', help='Path to save encoder model to if one does not already exist')
+parser.add_argument('-env', '--env_name', dest='env_name', type=str,
+    default='SuperMarioBros-v0', help='Which environment to use')
 
 if __name__ == '__main__':
     ### Setp for MPI ###
@@ -70,47 +72,59 @@ if __name__ == '__main__':
     else:
         device_config = tf.ConfigProto(device_count={'GPU': 0})
 
-    hasl = HASL(comm, controller, rank, ImgEncoder, state_shape=(OBS_DIM, OBS_DIM), state_depth=OBS_DEPTH, sess_config=device_config)
+    if args.env_name == 'SuperMarioBros-v0':
+        encoder_type = ImgEncoder
+        n_base_acts = 12
+    elif args.env_name == 'FetchPickAndPlace-v1':
+        encoder_type = RobotEncoder
+        n_base_acts = 9
+    else:
+        raise ValueError('env_name must be either SuperMarioBros-v0 or FetchPickAndPlace-v1')
+
+    hasl = HASL(comm, controller, rank, encoder_type, n_base_acts=n_base_acts,
+        state_shape=(OBS_DIM, OBS_DIM), state_depth=OBS_DEPTH, sess_config=device_config)
 
     if rank == controller:
         log('Args: ' + str(args))
 
-    ### Load enoder model if it exists ###
-    if rank == controller:
-        if os.path.exists(args.encoder_save_path + '.index') and \
-                 os.path.isfile(args.encoder_save_path + '.index'):
-            hasl.load_encoder(args.encoder_save_path)
-            args.n_encoder_epochs = 0
-            comm.bcast(args.n_encoder_epochs, controller)
-            log('Loaded HASL autoencoder model!')
-    else:
-        args.n_encoder_epochs = comm.bcast(None, controller)
-
-    hasl.sync_weights()
-
-    ### Encoder training loop ###
-
-    for encoder_epoch in range(1, args.n_encoder_epochs+1):
+    if hasl.encoder.train_req:
+        ### Load enoder model if it exists ###
         if rank == controller:
-            log(f'----- Encoder Training Epoch {epoch} -----')
-            log('# micro steps: {}'.format(len(encoder_data)))
-
-            # Run rollouts
-            _, encoder_data, _ = \
-                gather_data(comm, rank, controller, hasl, args, n_data_batches, data_type='encoder')
-
-            ### Train auto encoder model ###
-            assert encoder_data.shape[1] == 4, 'The encoder data must have a shape of (?, 4)!'
-            train_states = encoder_data[:, 0]
-            train_actions = encoder_data[:, 1]
-            train_state_ps = encoder_data[:, 3]
-                
-            loss = hasl.train_encoder(train_states, batch_size=128, save_path=args.encoder_save_path)
-            log(f'Auto encoder loss: {loss}')
+            if os.path.exists(args.encoder_save_path + '.index') and \
+                        os.path.isfile(args.encoder_save_path + '.index'):
+                hasl.load_encoder(args.encoder_save_path)
+                args.n_encoder_epochs = 0
+                comm.bcast(args.n_encoder_epochs, controller)
+                log('Loaded HASL autoencoder model!')
+        else:
+            args.n_encoder_epochs = comm.bcast(None, controller)
 
         hasl.sync_weights()
-        gc.collect()
 
+        ### Encoder training loop ###
+
+        for encoder_epoch in range(1, args.n_encoder_epochs+1):
+            if rank == controller:
+                log(f'----- Encoder Training Epoch {epoch} -----')
+                log('# micro steps: {}'.format(len(encoder_data)))
+
+                # Run rollouts
+                _, encoder_data, _ = \
+                    gather_data(comm, rank, controller, hasl, args, n_data_batches, data_type='encoder')
+
+                ### Train auto encoder model ###
+                assert encoder_data.shape[1] == 4, 'The encoder data must have a shape of (?, 4)!'
+                train_states = encoder_data[:, 0]
+                train_actions = encoder_data[:, 1]
+                train_state_ps = encoder_data[:, 3]
+                    
+                loss = hasl.train_encoder(train_states, batch_size=128, save_path=args.encoder_save_path)
+                log(f'Auto encoder loss: {loss}')
+
+            hasl.sync_weights()
+            gc.collect()
+
+    hasl.sync_weights()
 
     ### Policy training loop ###
 

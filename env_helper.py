@@ -1,9 +1,10 @@
 import cv2
+import gym
 import numpy as np
 from sklearn.neighbors import LSHForest
 
-from utils import OBS_DIM, OBS_DEPTH
-from hasl_model import HASL
+from utils import OBS_DIM, OBS_DEPTH, OBS_STACK_SIZE
+from hasl_model import HASL, ImgEncoder, RobotEncoder
 
 # Super Mario stuff
 from nes_py.wrappers import BinarySpaceToDiscreteSpaceEnv
@@ -56,10 +57,15 @@ class ObsStack():
     def get_flat_stack(self):
         return self.stack.copy().reshape(-1)
 
-def filter_obs(obs, obs_shape=(OBS_DIM, OBS_DIM)):
-    obs = cv2.resize(obs, obs_shape, interpolation=cv2.INTER_LINEAR)
-    obs = cv2.cvtColor(obs, cv2.COLOR_BGR2GRAY)
-    return obs / 255
+def filter_obs(obs, hasl, obs_shape=(OBS_DIM, OBS_DIM)):
+    if isinstance(hasl.encoder, ImgEncoder):
+        obs = cv2.resize(obs, obs_shape, interpolation=cv2.INTER_LINEAR)
+        obs = cv2.cvtColor(obs, cv2.COLOR_BGR2GRAY)
+        return obs / 255
+    elif isinstance(hasl.encoder, RobotEncoder):
+        return np.concatenate([obs['observation'], obs['achieved_goal'], obs['desired_goal']])
+
+    raise TypeError('filter_obs does not account for encoder of type {}'.format(type(hasl.encoder)))
 
 def discount_rewards(rewards, gamma=0.99):
     """Discounts an array of rewarwds, generally used after
@@ -81,12 +87,47 @@ def discount_rewards(rewards, gamma=0.99):
 
 ### Environment tasks ###
 
-def make_env():
-    env = gym_super_mario_bros.make('SuperMarioBros-v0')
-    env = BinarySpaceToDiscreteSpaceEnv(env, COMPLEX_MOVEMENT)
+def make_env(env_name=None):
+    if env_name == 'SuperMarioBros-v0':
+        env = gym_super_mario_bros.make('SuperMarioBros-v0')
+        env = BinarySpaceToDiscreteSpaceEnv(env, COMPLEX_MOVEMENT)
+    elif env_name == 'FetchPickAndPlace-v1':
+        env = gym.make('FetchPickAndPlace-v1')
+        env.tmp_step = env.step
+
+        def custom_step(act):
+            cont_act = None
+            if act == 0:
+                cont_act = [0, 0, 0, 0]
+            elif act == 1:
+                cont_act = [1, 0, 0, 0]
+            elif act == 2:
+                cont_act = [0, 1, 0, 0]
+            elif act == 3:
+                cont_act = [0, 0, 1, 0]
+            elif act == 4:
+                cont_act = [0, 0, 0, 1]
+            elif act == 5:
+                cont_act = [-1, 0, 0, 0]
+            elif act == 6:
+                cont_act = [0, -1, 0, 0]
+            elif act == 7:
+                cont_act = [0, 0, -1, 0]
+            elif act == 8:
+                cont_act = [0, 0, 0, -1]
+            else:
+                raise ValueError('Invalid action')
+                
+            return env.tmp_step(cont_act)
+
+        env.step = custom_step
+        env.action_space = gym.spaces.Discrete(9)
+    else:
+        raise ValueError('env_name must be either SuperMarioBros-v0 or FetchPickAndPlace-v1')
+
     return env
 
-def worker(hasl, max_steps=1000, act_epsilon=0.1, obs_stack_size=4, return_micro_data=True, return_macro_data=True):
+def worker(hasl, env_name, max_steps=1000, act_epsilon=0.1, obs_stack_size=4, return_micro_data=True, return_macro_data=True):
     """
     Performs the game simulation, and is called across all processes.
 
@@ -116,10 +157,10 @@ def worker(hasl, max_steps=1000, act_epsilon=0.1, obs_stack_size=4, return_micro
     else:
         full_data = None
 
-    env = make_env()
+    env = make_env(env_name)
 
     obs = env.reset()
-    obs = filter_obs(obs)
+    obs = filter_obs(obs, hasl)
     h_obs_stack = ObsStack(obs.shape, obs_stack_size) # High-level obs stack
     h_obs_stack.push(obs)
     enc_full_obs = hasl.apply_encoder([h_obs_stack.get_stack()])
@@ -143,7 +184,7 @@ def worker(hasl, max_steps=1000, act_epsilon=0.1, obs_stack_size=4, return_micro
             if return_micro_data:
                 full_data.append([l_obs_stack.get_stack()])
             obs_p, r, d, _ = env.step(act)
-            obs_p = filter_obs(obs_p)
+            obs_p = filter_obs(obs_p, hasl)
             if return_micro_data:
                 l_obs_stack.push(obs_p)
             if return_micro_data:
@@ -186,15 +227,15 @@ def gather_data(comm, rank, controller, hasl, args, n_batches, data_type='both',
         ### Simulate more episodes to gain training data ###
         if data_type == 'policy':
             all_data = comm.gather(
-                worker(hasl, act_epsilon=args.act_epsilon, obs_stack_size=OBS_DEPTH,
+                worker(hasl, args.env_name, act_epsilon=args.act_epsilon, obs_stack_size=OBS_STACK_SIZE,
                         max_steps=args.max_rollout_steps, return_micro_data=False), controller)
         elif data_type == 'encoder':
             all_data = comm.gather(
-                worker(hasl, act_epsilon=args.act_epsilon, obs_stack_size=OBS_DEPTH,
+                worker(hasl, args.env_name, act_epsilon=args.act_epsilon, obs_stack_size=OBS_STACK_SIZE,
                         max_steps=args.max_rollout_steps, return_macro_data=False), controller)
         else:
             all_data = comm.gather(
-                worker(hasl, act_epsilon=args.act_epsilon, obs_stack_size=OBS_DEPTH, 
+                worker(hasl, args.env_name, act_epsilon=args.act_epsilon, obs_stack_size=OBS_STACK_SIZE, 
                         max_steps=args.max_rollout_steps), controller)
                             
         if rank == controller:
