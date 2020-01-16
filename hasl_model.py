@@ -2,6 +2,7 @@ from tensorflow.keras.layers import Input, Dense, Conv2D, MaxPool2D, ZeroPadding
 from tensorflow import keras
 import tensorflow as tf
 import numpy as np
+import re
 
 from utils import OBS_STACK_SIZE, log, gaussian_likelihood
 
@@ -146,9 +147,9 @@ class ImgEncoder(BaseEncoder):
         self.saver.restore(self.sess, path)
 
 class RobotEncoder(BaseEncoder):
-    def __init__(self, sess, state_ph, state_depth, optimizer):
+    def __init__(self, sess, state_ph, state_depth, optimizer, enc_dim=31*OBS_STACK_SIZE):
         super(RobotEncoder, self).__init__(sess, state_ph, state_depth, optimizer, train_req=False)
-        self.enc_dim = 31 * OBS_STACK_SIZE
+        self.enc_dim = enc_dim
         
     def apply_encoder(self, state):
         # np.concatenate([state['observation'], state['achieved_goal'], state['desired_goal']])
@@ -184,10 +185,10 @@ class HASL():
         self.target_kl = ppo_kl_limit        # Max KL-divergence before the PPO loop haults
         self.n_curr_acts = self.n_act_seqs   # Equal to n_act_seqs until the set_act_seqs has been called to update it
                                              # Actual number of micro + macro actions currently available (curr # output nodes)
-        self.act_type = act_type
+        self.act_type = act_type             # Continuous or discrete actions type
         self.act_scale = act_scale
-        self.asns = []
-        self.asn_details = []
+        self.asns = []                       # List of ASN action output ops
+        self.asn_details = []                # List of ANS details dicts
         self.create_phs(state_shape=self.state_shape, state_depth=state_depth)
         self.create_optimizers()
         self.encoder_class = encoder_class
@@ -222,7 +223,7 @@ class HASL():
         """
         if asn_id is None:
             asn_id = self.n_act_seqs
-        scope_name = f'as_net_{asn_id}'
+        scope_name = f'asn_{asn_id}'
 
         if n_output_nodes is None:
             n_output_nodes = self.n_curr_acts
@@ -232,12 +233,12 @@ class HASL():
         with tf.variable_scope(scope_name):
             flat_act_seqs = tf.reshape(self.act_ph, (-1,))
 
-            dense = Dense(hidden_dims[0], activation='relu')(self.obs_op)
-            dense2 = Dense(hidden_dims[1], activation='relu')(dense)
-            act_probs = Dense(n_output_nodes, activation=None)(dense2)
-            act_out = tf.squeeze(tf.random.categorical(tf.log(act_probs), 1))
+            dense = Dense(hidden_dims[0], activation='relu', name='dense_1')(self.obs_op)
+            dense2 = Dense(hidden_dims[1], activation='relu', name='dense_2')(dense)
+            act_probs = Dense(n_output_nodes, activation=None, name='act_probs')(dense2)
+            act_out = tf.squeeze(tf.random.categorical(tf.log(act_probs), 1), name='act_out')
 
-            act_ohs = tf.one_hot(self.act_ph, n_output_nodes, dtype=tf.float32)
+            act_ohs = tf.one_hot(self.act_ph, n_output_nodes, dtype=tf.float32, name='act_ohs')
             
             loss = tf.losses.softmax_cross_entropy(act_ohs, act_probs)
             asn_update = self.asn_optimizer.minimize(loss)
@@ -245,7 +246,7 @@ class HASL():
         init_new_vars_ops = [x.initializer for x in tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES, scope=scope_name)]
         self.sess.run(init_new_vars_ops)
 
-        # TODO: Change the format for the asns list5
+        # TODO: Change the format for the asns list
         self.asns.append(act_out)
         self.asn_details.append({'hidden_dims': hidden_dims,
                                  'branch_factor': n_acts,
@@ -258,7 +259,7 @@ class HASL():
 
         return asn_id
 
-    def train_asn(self, asn_id, obs, acts, batch_size=32, n_epochs=5, test_frac=0.):
+    def train_asn(self, asn_id, obs, acts, batch_size=32, n_epochs=5, test_frac=0.1):
         if test_frac == 0:
             train_obs = obs
             train_acts = acts
@@ -284,6 +285,7 @@ class HASL():
                 correct_preds += (pred_acts == train_acts[idx:idx+batch_size]).sum()
             
             train_acc = float(correct_preds)/len(train_obs)*100
+            test_acc = None
 
             if test_frac > 0:
                 # Re-run ASN for testing accuracy
@@ -303,8 +305,10 @@ class HASL():
                 log('ASN Epoch {0} | Train acc: {1:.2f}%'.format(
                     epoch, train_acc))
 
-    def get_asn_by_id(self, id):
-        asn_idx = id - self.n_base_acts
+        return train_acc, test_acc
+
+    def get_asn_by_id(self, idx):
+        asn_idx = idx - self.n_base_acts
         return self.asns[asn_idx], self.asn_details[asn_idx]
 
     def create_phs(self, state_shape=(42, 42), state_depth=1):
@@ -423,14 +427,17 @@ class HASL():
     #         self.combined_loss = self.actor_loss + self.val_coef * self.value_loss + self.entropy_coef * self.entropy
     #         self.combined_update = self.optimizer.minimize(self.combined_loss)
 
-    def set_act_seqs(self, n_act_seqs=None, reload_weights=True):
+    def set_act_seqs(self, asn_keep_ids=None, n_act_seqs=None, reload_weights=True):
         if n_act_seqs:
             self.n_act_seqs = n_act_seqs
-        self.n_curr_acts = self.n_act_seqs
+        prev_enc_dim = self.encoder.enc_dim
 
         ### Save weights and reset graph and session ###
         if reload_weights:
-            saved_weights = self.sess.run(tf.trainable_variables())
+            weight_vals = self.sess.run(tf.trainable_variables())
+            saved_weights = {}
+            for t_var, weight_val in zip(tf.trainable_variables(), weight_vals):
+                saved_weights[t_var.name] = weight_val
 
         tf.reset_default_graph()
         self.sess.close()
@@ -444,6 +451,7 @@ class HASL():
         self.create_optimizers()
         self.encoder = self.encoder_class(self.sess, self.state_ph, self.state_depth, self.enc_optimizer)
         self.encoder.create_encoder_ops(state_shape=self.state_shape, n_base_acts=self.n_base_acts)
+        self.encoder.enc_dim = prev_enc_dim
         self.apply_encoder = self.encoder.apply_encoder
         self.train_encoder = self.encoder.train_encoder
         if self.encoder.train_req:
@@ -457,22 +465,48 @@ class HASL():
         self.asns = []
         asn_details_copy = self.asn_details
         self.asn_details = []
-        for i in range(self.n_curr_acts - self.n_base_acts):
-            asn_id = i + self.n_base_acts
+        asn_id_weight_map = {}
+        n_keep_asns = 0
+        for i in range(self.n_act_seqs - self.n_base_acts):
+            orig_asn_id = i + self.n_base_acts
+            new_asn_id = self.n_curr_acts + n_keep_asns
+            if asn_keep_ids is not None and orig_asn_id not in asn_keep_ids:
+                continue
+
+            n_keep_asns += 1
+
+            asn_id_weight_map['asn_' + str(new_asn_id)] = 'asn_' + str(orig_asn_id)
+
             self.create_asn_ops(
                 n_acts=asn_details_copy[i]['branch_factor'], 
                 hidden_dims=asn_details_copy[i]['hidden_dims'],
                 n_output_nodes=asn_details_copy[i]['n_output_nodes'],
-                asn_id=asn_id,
-                incr_act_seqs=False)
+                incr_act_seqs=False,
+                asn_id=new_asn_id)
+
+        self.n_act_seqs = self.n_base_acts + n_keep_asns
+        self.n_curr_acts = self.n_act_seqs
 
         ### Reload applicable weights ###
+        
         if reload_weights:
+            asn_scope_pattern = re.compile('asn_[0-9]+')
             self.sess.run(tf.global_variables_initializer())
             t_vars = tf.trainable_variables()
-            for pair in zip(t_vars, saved_weights):
-                if 'policy/act_probs' not in pair[0].name:
-                    self.sess.run(tf.assign(pair[0], pair[1]))
+            new_weights = {t_var.name: t_var for t_var in t_vars \
+                if 'policy/act_probs' not in t_var.name}
+
+            for new_name, new_var in new_weights.items():
+                asn_match = asn_scope_pattern.match(new_name)
+                if asn_match:
+                    new_asn_scope = asn_match.group(0)
+                    orig_asn_scope = asn_id_weight_map[new_asn_scope]
+                    orig_name = new_name.replace(new_asn_scope, orig_asn_scope)
+                else:
+                    orig_name = new_name
+
+                print(orig_name, '->', new_name)
+                self.sess.run(tf.assign(new_var, saved_weights[orig_name]))        
 
     # TODO: This function looks weird
     def choose_action(self, obs, act_stack=None, batch_size=1024, epsilon=0.1):

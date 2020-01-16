@@ -23,8 +23,10 @@ parser.add_argument('-nr', '--n_rollouts', dest='n_rollouts', type=int,
     default=4, help='Number of rollouts per epoch.')
 parser.add_argument('-nar', '--n_asn_rollouts', dest='n_asn_rollouts', type=int,
     default=4, help='Number of rollouts used for training an ASN per batch')
-parser.add_argument('-nag', '--n_asn_gen', dest='n_asn_proposals', type=int,
-    default=5, help='Number of ASNs created in one training cycle')
+parser.add_argument('-nag', '--n_asn_proposals', dest='n_asn_proposals', type=int,
+    default=10, help='Number of ASNs created in one training cycle')
+parser.add_argument('-nat', '--n_asn_keep', dest='n_asn_keep', type=int,
+    default=2, help='Number of ASNs kept from the generated ones per training cycle')
 parser.add_argument('-apd', '--asn_proposal_delay', dest='asn_proposal_delay', type=int,
     default=8, help='Number of epochs in between ASN generation')
 parser.add_argument('-nas', '--n_asn_train_samples', dest='n_asn_train_samples', type=int,
@@ -36,7 +38,7 @@ parser.add_argument('-atb', '--n_asn_train_batches', dest='n_asn_train_batches',
 parser.add_argument('-b', '--act_branch_factor', dest='act_branch_factor', type=int,
     default=3, help='Number of actions each ASN should execute')
 parser.add_argument('-ee', '--n_encoder_epochs', dest='n_encoder_epochs', type=int,
-    default=10, help='Number of epochs to train the encoder before policy training begins')
+    default=10, help='Number of epochs to train the  encoder before policy training begins')
 parser.add_argument('-ae', '--act_epsilon', dest='act_epsilon', type=float,
     default=1., help='Initial chance of taking a random action')
 parser.add_argument('-tae', '--target_act_epsilon', dest='target_act_epsilon', type=float,
@@ -76,10 +78,15 @@ if __name__ == '__main__':
         encoder_type = ImgEncoder
         n_base_acts = 12
     elif args.env_name == 'FetchPickAndPlace-v1':
-        encoder_type = RobotEncoder
+        encoder_type = lambda sess, state_ph, state_depth, optimizer: \
+            RobotEncoder(sess, state_ph, state_depth, optimizer, enc_dim=28*OBS_STACK_SIZE)
+        n_base_acts = 9
+    elif args.env_name == 'FetchReach-v1':
+        encoder_type = lambda sess, state_ph, state_depth, optimizer: \
+            RobotEncoder(sess, state_ph, state_depth, optimizer, enc_dim=13*OBS_STACK_SIZE)
         n_base_acts = 9
     else:
-        raise ValueError('env_name must be either SuperMarioBros-v0 or FetchPickAndPlace-v1')
+        raise ValueError('env_name must be either SuperMarioBros-v0 or FetchPickAndPlace-v1 or FetchReach-v1')
 
     hasl = HASL(comm, controller, rank, encoder_type, n_base_acts=n_base_acts,
         state_shape=(OBS_DIM, OBS_DIM), state_depth=OBS_DEPTH, sess_config=device_config)
@@ -135,6 +142,8 @@ if __name__ == '__main__':
     for epoch in range(1, args.n_epochs+1):
         if epoch % args.asn_proposal_delay == 0:
 
+            ### Do ASN Proposals and Training ###
+
             if rank == controller:
                 log(f'----- Epoch {epoch} -----')
 
@@ -143,6 +152,7 @@ if __name__ == '__main__':
                 asn_id = hasl.create_asn_ops(n_acts=args.act_branch_factor, hidden_dims=(32,32,))
                 new_asn_ids.append(asn_id)
 
+            top_samples = None
             for asn_epoch in range(args.n_asn_train_batches):
                 # Run rollouts
                 train_data, _, all_rewards = gather_data(
@@ -175,17 +185,18 @@ if __name__ == '__main__':
                     all_states = np.asarray(all_states).squeeze()
                     act_seqs = np.asarray(act_seqs)
 
-                    ### Use scaled on rewards to stochastically choose which episodes to pull actions from ###
+                    ### Use scaled rewards to stochastically choose which episodes to pull actions from ###
 
-                    scaled_rewards = np.asarray(reward_list)
-                    zero_dist = min(reward_list)
-                    scaled_rewards -= zero_dist
-                    total_reward = sum(scaled_rewards)
-                    scaled_rewards /= total_reward
+                    if not top_samples:
+                        scaled_rewards = np.asarray(reward_list)
+                        zero_dist = min(reward_list)
+                        scaled_rewards -= zero_dist
+                        total_reward = sum(scaled_rewards)
+                        scaled_rewards /= total_reward
 
-                    top_ids = np.random.choice(
-                        range(len(scaled_rewards)), size=args.n_asn_proposals, replace=False, p=scaled_rewards)
-                    top_samples = [state_changes[i] for i in top_ids] # List of the central samples
+                        top_ids = np.random.choice(
+                            range(len(scaled_rewards)), size=args.n_asn_proposals, replace=False, p=scaled_rewards)
+                        top_samples = [state_changes[i] for i in top_ids] # List of the central samples
 
                     ### Gather and format data for action sequence proposals ###
 
@@ -218,12 +229,26 @@ if __name__ == '__main__':
 
                     log(str(obs.shape) + ' ' + str(acts.shape))
 
+                    asn_accuracy = []
                     for i in range(args.n_asn_proposals):
                         log(f'Training ASN #{new_asn_ids[i]}'.format(i+1))
-                        hasl.train_asn(new_asn_ids[i], obs[i], acts[i], batch_size=32, n_epochs=args.n_asn_train_epochs)
-                
+                        train_acc, test_acc = hasl.train_asn(new_asn_ids[i], obs[i], acts[i], batch_size=32, n_epochs=args.n_asn_train_epochs)
+                        asn_accuracy.append((new_asn_ids[i], train_acc, test_acc))
+
             if rank == controller:
-                hasl.set_act_seqs()
+                keep_asn_ids = list(range(hasl.n_base_acts, hasl.n_curr_acts))
+                log(str(keep_asn_ids))
+                
+                sort_key = lambda x: x[1]
+                if asn_accuracy[0][2] is not None:
+                    sort_key = lambda x: x[2]
+
+                best_asns = sorted(asn_accuracy, key=sort_key, reverse=True)[:args.n_asn_keep]
+                best_asn_ids = [x[0] for x in best_asns]
+                keep_asn_ids.extend(best_asn_ids)
+                log(str(((str(best_asn_ids),  str(keep_asn_ids)))))
+                hasl.set_act_seqs(asn_keep_ids=keep_asn_ids)
+                log(str((hasl.n_curr_acts, hasl.n_act_seqs, len(hasl.asns))))
 
             hasl.sync_asns()
         else:

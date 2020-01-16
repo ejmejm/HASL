@@ -63,7 +63,7 @@ def filter_obs(obs, hasl, obs_shape=(OBS_DIM, OBS_DIM)):
         obs = cv2.cvtColor(obs, cv2.COLOR_BGR2GRAY)
         return obs / 255
     elif isinstance(hasl.encoder, RobotEncoder):
-        return np.concatenate([obs['observation'], obs['achieved_goal'], obs['desired_goal']])
+        return np.concatenate([obs['observation'], obs['desired_goal']])
 
     raise TypeError('filter_obs does not account for encoder of type {}'.format(type(hasl.encoder)))
 
@@ -92,7 +92,38 @@ def make_env(env_name=None):
         env = gym_super_mario_bros.make('SuperMarioBros-v0')
         env = BinarySpaceToDiscreteSpaceEnv(env, COMPLEX_MOVEMENT)
     elif env_name == 'FetchPickAndPlace-v1':
-        env = gym.make('FetchPickAndPlace-v1')
+        env = gym.make('FetchPickAndPlace-v1', reward_type='dense')
+        env.tmp_step = env.step
+
+        def custom_step(act):
+            cont_act = None
+            if act == 0:
+                cont_act = [0, 0, 0, 0]
+            elif act == 1:
+                cont_act = [1, 0, 0, 0]
+            elif act == 2:
+                cont_act = [0, 1, 0, 0]
+            elif act == 3:
+                cont_act = [0, 0, 1, 0]
+            elif act == 4:
+                cont_act = [0, 0, 0, 1]
+            elif act == 5:
+                cont_act = [-1, 0, 0, 0]
+            elif act == 6:
+                cont_act = [0, -1, 0, 0]
+            elif act == 7:
+                cont_act = [0, 0, -1, 0]
+            elif act == 8:
+                cont_act = [0, 0, 0, -1]
+            else:
+                raise ValueError('Invalid action')
+                
+            return env.tmp_step(cont_act)
+
+        env.step = custom_step
+        env.action_space = gym.spaces.Discrete(9)
+    elif env_name == 'FetchReach-v1':
+        env = gym.make('FetchReach-v1', reward_type='dense')
         env.tmp_step = env.step
 
         def custom_step(act):

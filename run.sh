@@ -1,1 +1,11 @@
-mpiexec -n 6 python run_hasl.py -ms 1500 -nr 6 -nar 12 -nag 3 -apd 16 -nas 256 -ate 1 -atb 5
+mpiexec -n 6 python run_hasl.py \
+--max_rollout_steps 1500 \
+--n_rollouts 6 \
+--n_asn_rollouts 12 \
+--n_asn_proposals 15 \
+--n_asn_keep 2 \
+--asn_proposal_delay 16 \
+--n_asn_train_samples 256 \
+--n_asn_train_epochs 1 \
+--n_asn_train_batches 5 \
+--env_name "SuperMarioBros-v0"
