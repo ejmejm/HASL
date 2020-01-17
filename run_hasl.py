@@ -1,4 +1,5 @@
 import argparse
+import collections
 import numpy as np
 import gc
 import os
@@ -235,9 +236,11 @@ if __name__ == '__main__':
                         train_acc, test_acc = hasl.train_asn(new_asn_ids[i], obs[i], acts[i], batch_size=32, n_epochs=args.n_asn_train_epochs)
                         asn_accuracy.append((new_asn_ids[i], train_acc, test_acc))
 
+            ### Choose ASNs to Keep ###
+
+            keep_asn_ids = None 
             if rank == controller:
                 keep_asn_ids = list(range(hasl.n_base_acts, hasl.n_curr_acts))
-                log(str(keep_asn_ids))
                 
                 sort_key = lambda x: x[1]
                 if asn_accuracy[0][2] is not None:
@@ -246,19 +249,32 @@ if __name__ == '__main__':
                 best_asns = sorted(asn_accuracy, key=sort_key, reverse=True)[:args.n_asn_keep]
                 best_asn_ids = [x[0] for x in best_asns]
                 keep_asn_ids.extend(best_asn_ids)
-                log(str(((str(best_asn_ids),  str(keep_asn_ids)))))
                 hasl.set_act_seqs(asn_keep_ids=keep_asn_ids)
-                log(str((hasl.n_curr_acts, hasl.n_act_seqs, len(hasl.asns))))
 
-            hasl.sync_asns()
+            # Sync models on all processes
+            keep_asn_ids = comm.bcast(keep_asn_ids, controller)
+            hasl.sync_asns(asn_keep_ids=keep_asn_ids)
         else:
             # Run rollouts
             cat_train_data, _, all_rewards = \
                 gather_data(comm, rank, controller, hasl, args, n_process_batches, data_type='policy')
 
             if rank == controller:
+                # Calculate how frequently each macro action is being used
+                n_possible_macro_acts = hasl.n_curr_acts
+                act_counter = np.zeros(n_possible_macro_acts, dtype=np.int32)
+                for macro_act in cat_train_data[:,1]:
+                    act_counter[macro_act] += 1
+                total_act_count = len(cat_train_data)
+                act_usages = [count / total_act_count for count in act_counter]
+
                 log(f'----- Epoch {epoch} -----')
                 log('# macro steps: {}'.format(len(cat_train_data)))
+
+                act_usage_str = ' | '.join(
+                    ['{0}: {1:.2f}%'.format(i, usage*100) for i, usage in enumerate(act_usages)])
+                log(act_usage_str)
+
                 log(f'Avg Reward: {np.mean(all_rewards)}, Min: {np.min(all_rewards)}, Max: {np.max(all_rewards)}, Std: {np.std(all_rewards)}')
 
                 ### Train master network policy ###

@@ -457,10 +457,18 @@ class HASL():
         if self.encoder.train_req:
             self.save_encoder = self.encoder.save_encoder
             self.load_encoder = self.encoder.load_encoder
+
+        n_new_act_seqs = self.n_act_seqs
+        if asn_keep_ids is not None:
+            n_new_act_seqs = self.n_base_acts
+            for keep_id in asn_keep_ids:
+                if keep_id >= self.n_base_acts and keep_id < self.n_act_seqs:
+                    n_new_act_seqs += 1
+
         if self.act_type == 'discrete':
-            self.create_discrete_policy_ops(n_act_seqs=self.n_act_seqs)
+            self.create_discrete_policy_ops(n_act_seqs=n_new_act_seqs)
         elif self.act_type == 'continuous':
-            self.create_continuous_policy_ops(n_act_seqs=self.n_act_seqs)
+            self.create_continuous_policy_ops(n_act_seqs=n_new_act_seqs)
 
         self.asns = []
         asn_details_copy = self.asn_details
@@ -468,8 +476,8 @@ class HASL():
         asn_id_weight_map = {}
         n_keep_asns = 0
         for i in range(self.n_act_seqs - self.n_base_acts):
-            orig_asn_id = i + self.n_base_acts
-            new_asn_id = self.n_curr_acts + n_keep_asns
+            orig_asn_id = self.n_base_acts + i
+            new_asn_id = self.n_base_acts + n_keep_asns
             if asn_keep_ids is not None and orig_asn_id not in asn_keep_ids:
                 continue
 
@@ -505,7 +513,6 @@ class HASL():
                 else:
                     orig_name = new_name
 
-                print(orig_name, '->', new_name)
                 self.sess.run(tf.assign(new_var, saved_weights[orig_name]))        
 
     # TODO: This function looks weird
@@ -607,7 +614,7 @@ class HASL():
             for pair in zip(t_vars, sync_vars):
                 self.sess.run(tf.assign(pair[0], pair[1]))
 
-    def sync_asns(self):
+    def sync_asns(self, asn_keep_ids=None):
         if self.rank == self.controller:
             branch_factors = [self.asn_details[i]['branch_factor'] for i in range(len(self.asn_details))]
             hidden_dims = [self.asn_details[i]['hidden_dims'] for i in range(len(self.asn_details))]
@@ -616,7 +623,7 @@ class HASL():
             n_target_acts, branch_factors, hidden_dims = self.comm.bcast(None, self.controller)
             for i in range(n_target_acts - self.n_act_seqs):
                 self.create_asn_ops(n_acts=branch_factors[i], hidden_dims=hidden_dims[i])
-            self.set_act_seqs()
+            self.set_act_seqs(asn_keep_ids=asn_keep_ids)
 
         self.sync_weights()
 
